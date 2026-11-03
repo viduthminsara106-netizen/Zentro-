@@ -1,0 +1,198 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity Blueprint Validators
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+        'uid', 'username', 'email', 'countryCode', 'mobile',
+        'securityPasswordHash', 'referralCode', 'referredBy',
+        'vipLevel', 'balance', 'totalEarnings', 'tasksCompletedToday',
+        'kycStatus', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid', 'username', 'email', 'countryCode', 'mobile',
+        'securityPasswordHash', 'referralCode', 'referredBy',
+        'vipLevel', 'balance', 'totalEarnings', 'tasksCompletedToday',
+        'kycStatus', 'createdAt', 'updatedAt'
+      ]) &&
+      data.uid == request.auth.uid &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.username is string && data.username.size() >= 2 && data.username.size() <= 60 &&
+      data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+      data.countryCode is string && data.countryCode.size() >= 1 && data.countryCode.size() <= 24 &&
+      data.mobile is string && data.mobile.size() >= 3 && data.mobile.size() <= 30 &&
+      data.securityPasswordHash is string && data.securityPasswordHash.size() >= 4 && data.securityPasswordHash.size() <= 128 &&
+      data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32 && data.referralCode.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.referredBy is string && data.referredBy.size() >= 3 && data.referredBy.size() <= 32 && data.referredBy.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.vipLevel is number && data.vipLevel >= 0 && data.vipLevel <= 5 &&
+      data.balance is number && data.balance >= 0 && data.balance <= 100000000 &&
+      data.totalEarnings is number && data.totalEarnings >= 0 && data.totalEarnings <= 100000000 &&
+      data.tasksCompletedToday is number && data.tasksCompletedToday >= 0 && data.tasksCompletedToday <= 100 &&
+      data.kycStatus is string && data.kycStatus in ['unverified', 'pending', 'verified'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['userId', 'type', 'amount', 'status', 'description', 'createdAt']) &&
+      data.keys().hasOnly(['userId', 'type', 'amount', 'status', 'description', 'createdAt']) &&
+      data.userId == request.auth.uid &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.type is string && data.type in ['deposit', 'withdrawal', 'vip_upgrade', 'task_reward', 'referral_bonus'] &&
+      data.amount is number && data.amount > 0 && data.amount <= 10000000 &&
+      data.status is string && data.status in ['completed', 'pending', 'rejected'] &&
+      data.description is string && data.description.size() >= 1 && data.description.size() <= 200 &&
+      data.createdAt is timestamp;
+    }
+
+    function isValidBankAccount(data) {
+      return data.keys().hasAll(['userId', 'bankName', 'accountHolder', 'accountNumber', 'routingOrSwift', 'createdAt']) &&
+      data.keys().hasOnly(['userId', 'bankName', 'accountHolder', 'accountNumber', 'routingOrSwift', 'createdAt']) &&
+      data.userId == request.auth.uid &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.bankName is string && data.bankName.size() >= 2 && data.bankName.size() <= 80 &&
+      data.accountHolder is string && data.accountHolder.size() >= 2 && data.accountHolder.size() <= 80 &&
+      data.accountNumber is string && data.accountNumber.size() >= 4 && data.accountNumber.size() <= 64 &&
+      data.routingOrSwift is string && data.routingOrSwift.size() >= 1 && data.routingOrSwift.size() <= 40 &&
+      data.createdAt is timestamp;
+    }
+
+    function isValidKycRecord(data) {
+      return data.keys().hasAll(['userId', 'fullName', 'documentType', 'documentNumber', 'aiVerificationNotes', 'status', 'createdAt', 'updatedAt']) &&
+      data.keys().hasOnly(['userId', 'fullName', 'documentType', 'documentNumber', 'aiVerificationNotes', 'status', 'createdAt', 'updatedAt']) &&
+      data.userId == request.auth.uid &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100 &&
+      data.documentType is string && data.documentType in ['passport', 'national_id', 'driver_license'] &&
+      data.documentNumber is string && data.documentNumber.size() >= 3 && data.documentNumber.size() <= 60 &&
+      data.aiVerificationNotes is string && data.aiVerificationNotes.size() <= 1000 &&
+      data.status is string && data.status in ['pending', 'verified', 'rejected'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidReferralRecord(data) {
+      return data.keys().hasAll(['referrerUid', 'referredUsername', 'referralCodeUsed', 'tierLevel', 'vipLevel', 'commissionEarned', 'createdAt']) &&
+      data.keys().hasOnly(['referrerUid', 'referredUsername', 'referralCodeUsed', 'tierLevel', 'vipLevel', 'commissionEarned', 'createdAt']) &&
+      data.referrerUid == request.auth.uid &&
+      data.referrerUid is string && data.referrerUid.size() >= 1 && data.referrerUid.size() <= 128 && data.referrerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.referredUsername is string && data.referredUsername.size() >= 2 && data.referredUsername.size() <= 60 &&
+      data.referralCodeUsed is string && data.referralCodeUsed.size() >= 3 && data.referralCodeUsed.size() <= 32 && data.referralCodeUsed.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.tierLevel is number && data.tierLevel >= 1 && data.tierLevel <= 5 &&
+      data.vipLevel is number && data.vipLevel >= 0 && data.vipLevel <= 5 &&
+      data.commissionEarned is number && data.commissionEarned >= 0 && data.commissionEarned <= 1000000 &&
+      data.createdAt is timestamp;
+    }
+
+    // 1. Users Collection (PII Isolated to Owner only)
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().referralCode == existing().referralCode &&
+        incoming().referredBy == existing().referredBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Balance, VIP, or Task Completion Update
+          incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'totalEarnings', 'vipLevel', 'tasksCompletedToday', 'updatedAt']) ||
+          // Action 2: Profile or Security Password Update
+          incoming().diff(existing()).affectedKeys().hasOnly(['username', 'countryCode', 'mobile', 'securityPasswordHash', 'kycStatus', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    // 2. Transactions Collection (Immutable financial ledger)
+    match /transactions/{transactionId} {
+      allow get: if isSignedIn() && isValidId(transactionId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        isValidId(transactionId) &&
+        isValidTransaction(incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(incoming().userId));
+      allow update, delete: if false;
+    }
+
+    // 3. Bank Accounts Collection
+    match /bank_accounts/{bankId} {
+      allow get: if isSignedIn() && isValidId(bankId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        isValidId(bankId) &&
+        isValidBankAccount(incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(incoming().userId));
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(bankId) && existing().userId == request.auth.uid;
+    }
+
+    // 4. KYC Records Collection (Terminal state locked once verified)
+    match /kyc_records/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidKycRecord(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(userId));
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidKycRecord(incoming()) &&
+        existing().status != 'verified' &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'documentType', 'documentNumber', 'aiVerificationNotes', 'status', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 5. Referrals Collection (Only VIP 1+ members can create referrals)
+    match /referrals/{referralId} {
+      allow get: if isSignedIn() && isValidId(referralId) && existing().referrerUid == request.auth.uid;
+      allow list: if isSignedIn() && existing().referrerUid == request.auth.uid;
+      allow create: if isSignedIn() &&
+        isValidId(referralId) &&
+        isValidReferralRecord(incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(incoming().referrerUid)) &&
+        get(/databases/$(database)/documents/users/$(incoming().referrerUid)).data.vipLevel >= 1;
+      allow update, delete: if false;
+    }
+  }
+}

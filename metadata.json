@@ -1,0 +1,6 @@
+{
+  "name": "Zentro",
+  "description": "Zentro financial and bioscience platform featuring VIP membership tiers, task management with Google Tasks, referral networks, KYC & banking management, AlphaFold molecular workbench, and AI studio tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,344 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile, VIP tier, balance, and referral metadata for Zentro.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Display username.",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address.",
+          "maxLength": 120
+        },
+        "countryCode": {
+          "type": "string",
+          "description": "Country dialing code with flag identifier.",
+          "maxLength": 16
+        },
+        "mobile": {
+          "type": "string",
+          "description": "Mobile phone number.",
+          "maxLength": 30
+        },
+        "securityPasswordHash": {
+          "type": "string",
+          "description": "Hashed or encoded security PIN/password for transactions.",
+          "maxLength": 128
+        },
+        "referralCode": {
+          "type": "string",
+          "description": "Unique referral code assigned to this user.",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "referredBy": {
+          "type": "string",
+          "description": "Valid referral code used during registration (immutable).",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "vipLevel": {
+          "type": "integer",
+          "description": "Active VIP tier from 0 to 5."
+        },
+        "balance": {
+          "type": "number",
+          "description": "Current wallet balance in USDT."
+        },
+        "totalEarnings": {
+          "type": "number",
+          "description": "Cumulative task and referral earnings in USDT."
+        },
+        "tasksCompletedToday": {
+          "type": "integer",
+          "description": "Number of daily VIP tasks completed today."
+        },
+        "kycStatus": {
+          "type": "string",
+          "description": "Current KYC verification state.",
+          "enum": ["unverified", "pending", "verified"]
+        },
+        "country": {
+          "type": "string",
+          "description": "Selected user country name.",
+          "maxLength": 60
+        },
+        "currency": {
+          "type": "string",
+          "description": "Selected display and settlement currency code (e.g. LKR, USD, EUR).",
+          "maxLength": 16
+        },
+        "language": {
+          "type": "string",
+          "description": "Selected user interface language.",
+          "maxLength": 40
+        },
+        "deviceId": {
+          "type": "string",
+          "description": "Tracked hardware device fingerprint identifier (1 account per device).",
+          "maxLength": 80
+        },
+        "macAddress": {
+          "type": "string",
+          "description": "Tracked network hardware MAC identifier.",
+          "maxLength": 40
+        },
+        "ipAddress": {
+          "type": "string",
+          "description": "Tracked registration and session IP address.",
+          "maxLength": 64
+        },
+        "locationTracked": {
+          "type": "string",
+          "description": "Tracked geographic location and timezone signature.",
+          "maxLength": 120
+        },
+        "mustUpgradeNextVip": {
+          "type": "boolean",
+          "description": "When enabled by Admin, user must upgrade to the next VIP level and cannot mine or withdraw until upgraded."
+        },
+        "forceLogoutAt": {
+          "type": "string",
+          "description": "ISO timestamp when Admin forced a session logout for this user.",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "email",
+        "countryCode",
+        "mobile",
+        "securityPasswordHash",
+        "referralCode",
+        "referredBy",
+        "vipLevel",
+        "balance",
+        "totalEarnings",
+        "tasksCompletedToday",
+        "kycStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial ledger entry for deposits, withdrawals, VIP upgrades, and task rewards.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "Transaction category.",
+          "enum": ["deposit", "withdrawal", "vip_upgrade", "task_reward", "referral_bonus"]
+        },
+        "amount": {
+          "type": "number",
+          "description": "Transaction amount in USDT."
+        },
+        "status": {
+          "type": "string",
+          "description": "Settlement status.",
+          "enum": ["completed", "pending", "rejected"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable memo of the transaction.",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["userId", "type", "amount", "status", "description", "createdAt"]
+    },
+    "BankAccount": {
+      "title": "BankAccount",
+      "description": "User linked withdrawal bank or payout account.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "bankName": {
+          "type": "string",
+          "description": "Name of bank or financial institution.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "accountHolder": {
+          "type": "string",
+          "description": "Legal name of the account holder.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "accountNumber": {
+          "type": "string",
+          "description": "IBAN, account number, or wallet address.",
+          "minLength": 4,
+          "maxLength": 64
+        },
+        "routingOrSwift": {
+          "type": "string",
+          "description": "SWIFT, BIC, or branch code.",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["userId", "bankName", "accountHolder", "accountNumber", "routingOrSwift", "createdAt"]
+    },
+    "KycRecord": {
+      "title": "KycRecord",
+      "description": "Identity verification submission for a user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full legal name on identity document.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "documentType": {
+          "type": "string",
+          "description": "Type of government ID submitted.",
+          "enum": ["passport", "national_id", "driver_license"]
+        },
+        "documentNumber": {
+          "type": "string",
+          "description": "Government ID serial number.",
+          "minLength": 3,
+          "maxLength": 60
+        },
+        "aiVerificationNotes": {
+          "type": "string",
+          "description": "Automated document verification summary.",
+          "maxLength": 1000
+        },
+        "status": {
+          "type": "string",
+          "description": "Verification status.",
+          "enum": ["pending", "verified", "rejected"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["userId", "fullName", "documentType", "documentNumber", "aiVerificationNotes", "status", "createdAt", "updatedAt"]
+    },
+    "ReferralRecord": {
+      "title": "ReferralRecord",
+      "description": "Record of a team member referred by a user.",
+      "type": "object",
+      "properties": {
+        "referrerUid": {
+          "type": "string",
+          "description": "UID of the user who owns this referral entry.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "referredUsername": {
+          "type": "string",
+          "description": "Username of the referred team member.",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "referralCodeUsed": {
+          "type": "string",
+          "description": "Referral code used.",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "tierLevel": {
+          "type": "integer",
+          "description": "Referral tier (1, 2, or 3)."
+        },
+        "vipLevel": {
+          "type": "integer",
+          "description": "Referred member's VIP tier."
+        },
+        "commissionEarned": {
+          "type": "number",
+          "description": "Commission earned in USDT."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["referrerUid", "referredUsername", "referralCodeUsed", "tierLevel", "vipLevel", "commissionEarned", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user account documents strictly isolated to the owner or admin."
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "User financial transactions."
+    },
+    "/bank_accounts/{bankId}": {
+      "schema": { "$ref": "#/entities/BankAccount" },
+      "description": "User linked withdrawal bank accounts."
+    },
+    "/kyc_records/{userId}": {
+      "schema": { "$ref": "#/entities/KycRecord" },
+      "description": "User KYC identity records."
+    },
+    "/referrals/{referralId}": {
+      "schema": { "$ref": "#/entities/ReferralRecord" },
+      "description": "User referral and team commission records."
+    }
+  }
+}
