@@ -2592,13 +2592,220 @@ export interface AppNotification {
   actionModal?: 'deposit' | 'withdrawal' | 'active_vip' | 'support' | 'compare_tiers';
   actionLabel?: string;
   actionLabelSi?: string;
+  emailSent?: boolean;
+  emailTo?: string;
+  emailSentAt?: string;
+  emailSubject?: string;
   createdAt: string;
+}
+
+export interface SentEmailNotificationRecord {
+  id: string;
+  notificationId: string;
+  userId: string;
+  to: string;
+  username: string;
+  from: string;
+  subject: string;
+  title: string;
+  titleSi?: string;
+  message: string;
+  messageSi?: string;
+  category: NotificationCategory;
+  priority: NotificationPriority;
+  actionLabel?: string;
+  htmlBody: string;
+  status: 'delivered' | 'queued';
+  sentAt: string;
 }
 
 const USER_NOTIFICATIONS_PREFIX = 'zentro_notifications_v1_';
 const GLOBAL_BROADCASTS_KEY = 'zentro_global_broadcasts_v1';
 const USER_READ_BROADCASTS_PREFIX = 'zentro_read_broadcasts_v1_';
 const USER_DISMISSED_BROADCASTS_PREFIX = 'zentro_dismissed_broadcasts_v1_';
+const USER_EMAIL_NOTIF_ENABLED_PREFIX = 'zentro_email_notif_enabled_v1_';
+const USER_SENT_EMAIL_NOTIFS_PREFIX = 'zentro_sent_email_notifs_v1_';
+
+export function isEmailNotificationsEnabled(userId: string): boolean {
+  if (typeof window === 'undefined' || !userId) return true;
+  try {
+    const raw = localStorage.getItem(`${USER_EMAIL_NOTIF_ENABLED_PREFIX}${userId}`);
+    if (raw === null) return true;
+    return raw === 'true';
+  } catch {
+    return true;
+  }
+}
+
+export function setEmailNotificationsEnabled(userId: string, enabled: boolean): void {
+  if (typeof window === 'undefined' || !userId) return;
+  try {
+    localStorage.setItem(`${USER_EMAIL_NOTIF_ENABLED_PREFIX}${userId}`, String(enabled));
+    emitNotificationsUpdatedEvent({ userId });
+  } catch {
+    // ignore
+  }
+}
+
+export function buildZentroClientEmailHtml(params: {
+  username: string;
+  to: string;
+  title: string;
+  titleSi?: string;
+  message: string;
+  messageSi?: string;
+  category: NotificationCategory;
+  sentAt: string;
+}): string {
+  const formattedDate = (() => {
+    try {
+      return new Date(params.sentAt).toLocaleString();
+    } catch {
+      return params.sentAt;
+    }
+  })();
+
+  const siSection =
+    params.titleSi || params.messageSi
+      ? `
+      <div style="margin-top:16px;padding:14px 16px;border-radius:12px;background:#131d35;border:1px solid rgba(236,72,153,0.3);">
+        ${
+          params.titleSi
+            ? `<div style="font-weight:800;font-size:14px;color:#f472b6;margin-bottom:6px;">${params.titleSi}</div>`
+            : ''
+        }
+        ${
+          params.messageSi
+            ? `<div style="font-size:13px;line-height:1.6;color:#cbd5e1;">${params.messageSi}</div>`
+            : ''
+        }
+      </div>`
+      : '';
+
+  return `<div style="font-family:Inter,system-ui,-apple-system,sans-serif;background:#080e1e;color:#f8fafc;padding:24px;border-radius:16px;">
+  <div style="max-width:560px;margin:0 auto;background:#0e172c;border:1px solid rgba(56,189,248,0.3);border-radius:16px;overflow:hidden;">
+    <div style="padding:18px 22px;background:linear-gradient(90deg,#0284c7,#2563eb,#ec4899,#e11d48);color:#ffffff;">
+      <div style="font-size:11px;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;opacity:0.9;">ZENTRO OFFICIAL SETTLEMENT &amp; VIP DESK</div>
+      <div style="font-size:18px;font-weight:800;margin-top:4px;">${params.title}</div>
+    </div>
+    <div style="padding:20px 22px;">
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:12px;">
+        Hello <strong style="color:#38bdf8;">${params.username || 'Member'}</strong> (${params.to}),
+      </div>
+      <div style="font-size:14px;line-height:1.65;color:#e2e8f0;background:#131f3a;padding:14px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.08);">
+        ${params.message}
+      </div>
+      ${siSection}
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.1);font-size:11px;color:#64748b;display:flex;justify-content:space-between;">
+        <span>Category: <strong style="color:#f472b6;text-transform:uppercase;">${params.category}</strong></span>
+        <span>Delivered: ${formattedDate}</span>
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+function resolveUserEmailAndUsername(
+  userId: string,
+  fallbackEmail?: string,
+  fallbackUsername?: string
+): { email: string; username: string } {
+  let email = (fallbackEmail || '').trim();
+  let username = (fallbackUsername || '').trim();
+
+  if (typeof window !== 'undefined' && (!email || !username)) {
+    try {
+      const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+      if (rawAccounts) {
+        const accounts: Record<string, { profile: UserProfile }> = JSON.parse(rawAccounts);
+        const found = accounts[userId]?.profile;
+        if (found) {
+          if (!email && found.email) email = found.email;
+          if (!username && found.username) username = found.username;
+        }
+      }
+      if (!email || !username) {
+        const activeRaw = localStorage.getItem('zentro_active_local_user_v1');
+        if (activeRaw) {
+          const activeUser: UserProfile = JSON.parse(activeRaw);
+          if (activeUser?.uid === userId) {
+            if (!email && activeUser.email) email = activeUser.email;
+            if (!username && activeUser.username) username = activeUser.username;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    email: email || 'member@zentro.io',
+    username: username || 'Member',
+  };
+}
+
+export function getSentEmailNotifications(
+  userId: string,
+  userEmail?: string,
+  username?: string
+): SentEmailNotificationRecord[] {
+  if (typeof window === 'undefined' || !userId) return [];
+  try {
+    const key = `${USER_SENT_EMAIL_NOTIFS_PREFIX}${userId}`;
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+
+    const resolved = resolveUserEmailAndUsername(userId, userEmail, username);
+    const notifs = getUserNotifications(userId, resolved.username);
+    const seeded: SentEmailNotificationRecord[] = notifs.slice(0, 15).map((n) => {
+      const toAddr = n.emailTo || resolved.email;
+      const sentTime = n.emailSentAt || n.createdAt || new Date().toISOString();
+      const subject =
+        n.emailSubject || `[Zentro ${(n.category || 'Alert').toUpperCase()}] ${n.title}`;
+      return {
+        id: `email_${n.id}`,
+        notificationId: n.id,
+        userId,
+        to: toAddr,
+        username: resolved.username,
+        from: 'Zentro Official <notifications@zentro.io>',
+        subject,
+        title: n.title,
+        titleSi: n.titleSi,
+        message: n.message,
+        messageSi: n.messageSi,
+        category: n.category,
+        priority: n.priority,
+        actionLabel: n.actionLabel,
+        htmlBody: buildZentroClientEmailHtml({
+          username: resolved.username,
+          to: toAddr,
+          title: n.title,
+          titleSi: n.titleSi,
+          message: n.message,
+          messageSi: n.messageSi,
+          category: n.category,
+          sentAt: sentTime,
+        }),
+        status: 'delivered',
+        sentAt: sentTime,
+      };
+    });
+
+    if (seeded.length > 0) {
+      localStorage.setItem(key, JSON.stringify(seeded));
+    }
+    return seeded;
+  } catch {
+    return [];
+  }
+}
 
 export function emitNotificationsUpdatedEvent(detail?: {
   userId?: string;
@@ -2722,11 +2929,19 @@ export function pushUserNotification(
     actionModal?: 'deposit' | 'withdrawal' | 'active_vip' | 'support' | 'compare_tiers';
     actionLabel?: string;
     actionLabelSi?: string;
+    emailTo?: string;
+    username?: string;
   }
 ): AppNotification {
+  const nowIso = new Date().toISOString();
+  const emailActive = isEmailNotificationsEnabled(userId);
+  const resolved = resolveUserEmailAndUsername(userId, payload.emailTo, payload.username);
+  const computedSubject = `[Zentro ${(payload.category || 'Alert').toUpperCase()}] ${payload.title}`;
+
   const newNotif: AppNotification = {
     id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     userId,
+    targetUsername: resolved.username,
     title: payload.title,
     titleSi: payload.titleSi,
     message: payload.message,
@@ -2738,7 +2953,11 @@ export function pushUserNotification(
     actionModal: payload.actionModal,
     actionLabel: payload.actionLabel,
     actionLabelSi: payload.actionLabelSi,
-    createdAt: new Date().toISOString(),
+    emailSent: emailActive,
+    emailTo: resolved.email,
+    emailSentAt: emailActive ? nowIso : undefined,
+    emailSubject: computedSubject,
+    createdAt: nowIso,
   };
 
   if (typeof window === 'undefined' || !userId) return newNotif;
@@ -2749,6 +2968,47 @@ export function pushUserNotification(
     const existing: AppNotification[] = raw ? JSON.parse(raw) : [];
     const updated = [newNotif, ...existing].slice(0, 120);
     localStorage.setItem(key, JSON.stringify(updated));
+
+    if (emailActive) {
+      const emailKey = `${USER_SENT_EMAIL_NOTIFS_PREFIX}${userId}`;
+      const rawEmails = localStorage.getItem(emailKey);
+      const existingEmails: SentEmailNotificationRecord[] = rawEmails
+        ? JSON.parse(rawEmails)
+        : [];
+      const newEmailRecord: SentEmailNotificationRecord = {
+        id: `email_${newNotif.id}`,
+        notificationId: newNotif.id,
+        userId,
+        to: resolved.email,
+        username: resolved.username,
+        from: 'Zentro Official <notifications@zentro.io>',
+        subject: computedSubject,
+        title: newNotif.title,
+        titleSi: newNotif.titleSi,
+        message: newNotif.message,
+        messageSi: newNotif.messageSi,
+        category: newNotif.category,
+        priority: newNotif.priority,
+        actionLabel: newNotif.actionLabel,
+        htmlBody: buildZentroClientEmailHtml({
+          username: resolved.username,
+          to: resolved.email,
+          title: newNotif.title,
+          titleSi: newNotif.titleSi,
+          message: newNotif.message,
+          messageSi: newNotif.messageSi,
+          category: newNotif.category,
+          sentAt: nowIso,
+        }),
+        status: 'delivered',
+        sentAt: nowIso,
+      };
+      localStorage.setItem(
+        emailKey,
+        JSON.stringify([newEmailRecord, ...existingEmails].slice(0, 100))
+      );
+    }
+
     emitNotificationsUpdatedEvent({ userId, notification: newNotif });
   } catch {
     // ignore storage errors
