@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -13,18 +14,51 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '50mb' }));
 
-// Server-side 1-Account-Per-Device Registry (tracks deviceId, macAddress, and ipAddress)
+// Server-side 1-Account-Per-Device Registry (tracks deviceId, macAddress, ipAddress, clientIp, location, and hardwareSummary across all browsers & Incognito tabs)
 interface RegisteredDeviceEntry {
   uid: string;
   username: string;
+  email?: string;
   deviceId: string;
   macAddress: string;
   ipAddress: string;
+  clientIp: string;
   location: string;
+  hardwareSummary: string;
   registeredAt: string;
 }
 
+const DEVICE_LOCKS_FILE = path.join(__dirname, '.zentro_device_locks.json');
 const serverDeviceRegistry = new Map<string, RegisteredDeviceEntry>();
+
+function loadDeviceRegistryFromDisk(): void {
+  try {
+    if (fs.existsSync(DEVICE_LOCKS_FILE)) {
+      const raw = fs.readFileSync(DEVICE_LOCKS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && item.uid) {
+            serverDeviceRegistry.set(item.uid, item);
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore read errors
+  }
+}
+
+function saveDeviceRegistryToDisk(): void {
+  try {
+    const list = Array.from(serverDeviceRegistry.values());
+    fs.writeFileSync(DEVICE_LOCKS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch {
+    // ignore write errors
+  }
+}
+
+loadDeviceRegistryFromDisk();
 
 function extractClientIp(req: express.Request): string {
   const forwarded = req.headers['x-forwarded-for'];
@@ -57,6 +91,60 @@ function getServerNetworkMac(): string | null {
   return null;
 }
 
+function isMeaningfulIp(ip?: string): boolean {
+  if (!ip) return false;
+  const clean = ip.trim();
+  return (
+    clean.length > 0 &&
+    clean !== 'Detecting IP...' &&
+    clean !== 'Tracked IP'
+  );
+}
+
+function findMatchingDeviceLock(params: {
+  deviceId?: string;
+  macAddress?: string;
+  ipAddress?: string;
+  clientIp?: string;
+  location?: string;
+  hardwareSummary?: string;
+}): RegisteredDeviceEntry | null {
+  const { deviceId, macAddress, ipAddress, clientIp, location, hardwareSummary } = params;
+  for (const entry of serverDeviceRegistry.values()) {
+    const sameDeviceId = Boolean(deviceId && entry.deviceId && entry.deviceId === deviceId);
+    const sameMac = Boolean(macAddress && entry.macAddress && entry.macAddress === macAddress);
+    const samePublicIp = Boolean(
+      isMeaningfulIp(ipAddress) &&
+        isMeaningfulIp(entry.ipAddress) &&
+        entry.ipAddress === ipAddress!.trim()
+    );
+    const sameClientIp = Boolean(
+      isMeaningfulIp(clientIp) &&
+        isMeaningfulIp(entry.clientIp) &&
+        entry.clientIp === clientIp!.trim()
+    );
+    const sameLocationAndHardware = Boolean(
+      location &&
+        entry.location &&
+        entry.location === location &&
+        hardwareSummary &&
+        entry.hardwareSummary &&
+        entry.hardwareSummary === hardwareSummary
+    );
+
+    if (
+      sameDeviceId ||
+      sameMac ||
+      samePublicIp ||
+      sameClientIp ||
+      sameLocationAndHardware
+    ) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 app.get('/api/security/device-telemetry', (req, res) => {
   const ipAddress = extractClientIp(req);
   const acceptLanguage = req.headers['accept-language'] || 'en-US';
@@ -70,58 +158,79 @@ app.get('/api/security/device-telemetry', (req, res) => {
 });
 
 app.post('/api/security/check-device', (req, res) => {
-  const { deviceId, macAddress, ipAddress } = req.body || {};
-  const clientIp = ipAddress || extractClientIp(req);
-  for (const entry of serverDeviceRegistry.values()) {
-    if (
-      (deviceId && entry.deviceId === deviceId) ||
-      (macAddress && entry.macAddress === macAddress) ||
-      (deviceId && entry.ipAddress === clientIp && entry.deviceId === deviceId)
-    ) {
-      res.json({
-        locked: true,
-        existingUsername: entry.username,
-        existingUid: entry.uid,
-        entry,
-      });
-      return;
-    }
+  const { deviceId, macAddress, ipAddress, location, hardwareSummary } = req.body || {};
+  const clientIp = extractClientIp(req);
+  const matched = findMatchingDeviceLock({
+    deviceId,
+    macAddress,
+    ipAddress,
+    clientIp,
+    location,
+    hardwareSummary,
+  });
+  if (matched) {
+    res.json({
+      locked: true,
+      existingUsername: matched.username,
+      existingUid: matched.uid,
+      entry: matched,
+    });
+    return;
   }
   res.json({ locked: false });
 });
 
 app.post('/api/security/register-device', (req, res) => {
-  const { uid, username, deviceId, macAddress, ipAddress, location } = req.body || {};
-  const clientIp = ipAddress || extractClientIp(req);
+  const {
+    uid,
+    username,
+    email,
+    deviceId,
+    macAddress,
+    ipAddress,
+    locationTracked,
+    location,
+    hardwareSummary,
+  } = req.body || {};
+  const clientIp = extractClientIp(req);
+  const effectiveIp = isMeaningfulIp(ipAddress) ? String(ipAddress).trim() : clientIp;
+  const effectiveLocation = String(locationTracked || location || 'Tracked Region');
 
-  for (const entry of serverDeviceRegistry.values()) {
-    if (
-      (deviceId && entry.deviceId === deviceId) ||
-      (macAddress && entry.macAddress === macAddress)
-    ) {
-      if (entry.uid !== uid) {
-        res.status(409).json({
-          locked: true,
-          existingUsername: entry.username,
-          error: `Only 1 account is permitted per device. Device (${entry.deviceId} / MAC ${entry.macAddress} / IP ${entry.ipAddress}) is already registered to "${entry.username}".`,
-        });
-        return;
-      }
-    }
+  const matched = findMatchingDeviceLock({
+    deviceId,
+    macAddress,
+    ipAddress: effectiveIp,
+    clientIp,
+    location: effectiveLocation,
+    hardwareSummary,
+  });
+
+  if (matched && matched.uid !== uid && matched.username?.toLowerCase() !== String(username || '').toLowerCase()) {
+    res.status(409).json({
+      locked: true,
+      existingUsername: matched.username,
+      existingAccount: matched,
+      entry: matched,
+      error: `Only 1 account is permitted per device, IP, MAC, and location (Cross-Browser & Incognito Protected). This device (Device: ${matched.deviceId} · MAC: ${matched.macAddress} · IP: ${matched.ipAddress} · Location: ${matched.location}) is already registered to "${matched.username}".`,
+    });
+    return;
   }
 
   const record: RegisteredDeviceEntry = {
-    uid: String(uid || 'unknown'),
-    username: String(username || 'member'),
-    deviceId: String(deviceId || 'ZNT-DEV-DEFAULT'),
-    macAddress: String(macAddress || '00:1A:2B:3C:4D:5E'),
-    ipAddress: String(clientIp),
-    location: String(location || 'Tracked Region'),
-    registeredAt: new Date().toISOString(),
+    uid: String(uid || matched?.uid || 'unknown'),
+    username: String(username || matched?.username || 'member'),
+    email: String(email || matched?.email || ''),
+    deviceId: String(deviceId || matched?.deviceId || 'ZNT-DEV-DEFAULT'),
+    macAddress: String(macAddress || matched?.macAddress || '00:1A:2B:3C:4D:5E'),
+    ipAddress: String(effectiveIp),
+    clientIp: String(clientIp),
+    location: effectiveLocation,
+    hardwareSummary: String(hardwareSummary || matched?.hardwareSummary || ''),
+    registeredAt: matched?.registeredAt || new Date().toISOString(),
   };
-  if (deviceId) {
-    serverDeviceRegistry.set(deviceId, record);
-  }
+
+  serverDeviceRegistry.set(record.uid, record);
+  saveDeviceRegistryToDisk();
   res.json({ ok: true, record });
 });
 

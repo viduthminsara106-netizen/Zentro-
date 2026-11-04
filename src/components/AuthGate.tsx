@@ -14,8 +14,10 @@ import {
   DeviceSecurityTelemetry,
   DeviceAccountLockRecord,
   collectDeviceSecurityTelemetry,
+  detectIncognitoBrowsing,
   getDeterministicDeviceAndMac,
   getExistingDeviceAccountLock,
+  syncLocalDeviceLockToServer,
   isValidReferralCodeFormat,
   isAdminCredentials,
   ZENTRO_ATRIUM_BG_DATA_URI,
@@ -451,7 +453,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [securityPassword, setSecurityPassword] = useState('');
-  const [referralCode, setReferralCode] = useState('ZENTRO-VIP888');
+  const [referralCode, setReferralCode] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [acceptPrivacy, setAcceptPrivacy] = useState(true);
 
@@ -477,9 +479,32 @@ export const AuthGate: React.FC<AuthGateProps> = ({
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const refParam = params.get('ref');
+    const refParam = (params.get('ref') || params.get('invite') || params.get('code') || '')
+      .trim()
+      .toUpperCase();
     if (refParam && isValidReferralCodeFormat(refParam)) {
-      setReferralCode(refParam.trim().toUpperCase());
+      let isNonVipLocalReferrer = false;
+      try {
+        const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+        if (rawAccounts) {
+          const accounts = JSON.parse(rawAccounts);
+          const matched = Object.values(accounts).find(
+            (acc: any) => acc?.profile?.referralCode?.toUpperCase() === refParam
+          ) as any;
+          if (matched && (matched.profile?.vipLevel ?? 0) < 1) {
+            isNonVipLocalReferrer = true;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      if (!isNonVipLocalReferrer) {
+        setReferralCode(refParam);
+      } else {
+        setReferralCode('');
+      }
+    } else {
+      setReferralCode('');
     }
     const savedEmail = localStorage.getItem('zentro_remember_email');
     const savedUsername = localStorage.getItem('zentro_remember_username');
@@ -490,38 +515,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     collectDeviceSecurityTelemetry().then(async (telemetry) => {
       if (!mounted) return;
       setDeviceTelemetry(telemetry);
-      const localLock = getExistingDeviceAccountLock(telemetry);
-      if (localLock) {
-        setExistingDeviceLock(localLock);
-        return;
-      }
-      try {
-        const res = await fetch('/api/security/check-device', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            deviceId: telemetry.deviceId,
-            macAddress: telemetry.macAddress,
-            ipAddress: telemetry.ipAddress,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.locked && data.entry && mounted) {
-            setExistingDeviceLock({
-              uid: data.entry.uid,
-              username: data.entry.username,
-              email: '',
-              deviceId: data.entry.deviceId,
-              macAddress: data.entry.macAddress,
-              ipAddress: data.entry.ipAddress,
-              location: data.entry.location,
-              lockedAt: data.entry.registeredAt,
-            });
-          }
-        }
-      } catch {
-        // ignore
+      const syncedLock = await syncLocalDeviceLockToServer(telemetry);
+      if (mounted && syncedLock) {
+        setExistingDeviceLock(syncedLock);
       }
     });
     return () => {
@@ -532,17 +528,29 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const currentCountryObj =
     COUNTRY_OPTIONS.find((c) => c.code === selectedCountry) || COUNTRY_OPTIONS[0];
   const dialCodeFormatted = `${currentCountryObj.flag} ${currentCountryObj.dialCode.replace('-CA', '')}`;
-  const isRefValid = isValidReferralCodeFormat(referralCode);
+  const isRefValid = Boolean(referralCode.trim()) && isValidReferralCodeFormat(referralCode);
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError(null);
 
-    const activeLock = existingDeviceLock || getExistingDeviceAccountLock(deviceTelemetry);
+    const isIncognitoNow =
+      Boolean(deviceTelemetry.isIncognito) || (await detectIncognitoBrowsing());
+    if (isIncognitoNow) {
+      setLocalError(
+        'Incognito / Private browsing tabs cannot be used to create an account. Only 1 account per device, IP, MAC, and location is permitted.'
+      );
+      return;
+    }
+
+    const activeLock =
+      existingDeviceLock ||
+      getExistingDeviceAccountLock(deviceTelemetry) ||
+      (await syncLocalDeviceLockToServer(deviceTelemetry));
     if (activeLock) {
       setExistingDeviceLock(activeLock);
       setLocalError(
-        `Only 1 account is permitted per device. This device (Device: ${activeLock.deviceId} · MAC: ${activeLock.macAddress} · IP: ${activeLock.ipAddress} · Location: ${activeLock.location}) is already registered to "${activeLock.username}". Please Sign in instead.`
+        `Only 1 account is permitted per device, IP, MAC, and location (Cross-Browser & Incognito Protected). This device (Device: ${activeLock.deviceId} · MAC: ${activeLock.macAddress} · IP: ${activeLock.ipAddress} · Location: ${activeLock.location}) is already registered to "${activeLock.username}". Please Sign in instead.`
       );
       return;
     }
@@ -571,8 +579,10 @@ export const AuthGate: React.FC<AuthGateProps> = ({
       setLocalError('Please create a Security Password (at least 4 digits/characters).');
       return;
     }
-    if (!isRefValid) {
-      setLocalError('A valid Referral Code (invitee) is mandatory for registration.');
+    if (!referralCode.trim() || !isRefValid) {
+      setLocalError(
+        'An Invite Code is required to register. Please open the registration link shared by an active VIP member.'
+      );
       return;
     }
     if (!acceptPrivacy) {
@@ -953,12 +963,16 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   </button>
                 </div>
 
-                {/* 7. Referral Code / Invitee (Locked & Validated) */}
+                {/* 7. Referral Code / Invitee (Empty unless visited via VIP member ref link) */}
                 <div
                   className={`flex items-center gap-3.5 px-4 py-3.5 rounded-2xl border ${
-                    isDark
-                      ? 'bg-[#182032]/90 border-pink-500/40'
-                      : 'bg-pink-50/50 border-pink-300'
+                    isRefValid
+                      ? isDark
+                        ? 'bg-[#182032]/90 border-pink-500/40'
+                        : 'bg-pink-50/50 border-pink-300'
+                      : isDark
+                        ? 'bg-[#182032]/70 border-rose-500/40'
+                        : 'bg-rose-50/50 border-rose-300'
                   }`}
                 >
                   <InviteePictureIcon />
@@ -966,13 +980,19 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                     type="text"
                     readOnly
                     value={referralCode}
-                    placeholder="Please enter your invitee"
-                    title="Referral code is locked and verified for registration"
-                    className="w-full bg-transparent text-sm font-mono font-bold focus:outline-none cursor-not-allowed select-none"
+                    placeholder="Invite code empty (Use VIP member ref link)"
+                    title="Invite code is only populated via a VIP member's referral link"
+                    className="w-full bg-transparent text-sm font-mono font-bold focus:outline-none cursor-not-allowed select-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
-                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-gradient-to-r from-blue-500 to-pink-500 text-white text-[10px] font-mono font-bold shrink-0">
-                    <Lock className="w-3 h-3" /> VALID
-                  </span>
+                  {isRefValid ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-gradient-to-r from-blue-500 to-pink-500 text-white text-[10px] font-mono font-bold shrink-0">
+                      <Lock className="w-3 h-3" /> VALID
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-400 text-[10px] font-mono font-bold shrink-0">
+                      <Lock className="w-3 h-3" /> REQUIRED
+                    </span>
+                  )}
                 </div>
 
                 {/* 8. Tick for Remember Me & 9. Tick for Privacy Policy */}
@@ -1080,7 +1100,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                       Remember me
                     </span>
                   </label>
-                  <span className="font-mono text-pink-400">Invitee: {referralCode}</span>
+                  {referralCode ? (
+                    <span className="font-mono text-pink-400">Invitee: {referralCode}</span>
+                  ) : null}
                 </div>
 
                 <div className="pt-2">

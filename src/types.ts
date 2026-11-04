@@ -37,6 +37,7 @@ export interface DeviceSecurityTelemetry {
   ipAddress: string;
   location: string;
   hardwareSummary: string;
+  isIncognito?: boolean;
 }
 
 export interface TransactionRecord {
@@ -324,23 +325,75 @@ function hashStringDeterministic(input: string, seed = 0x811c9dc5): number {
   return h >>> 0;
 }
 
-function computeCanvasHardwareSignature(): string {
+function getNormalizedOsFamily(): string {
+  if (typeof navigator === 'undefined') return 'OS';
+  const ua = (navigator.userAgent || '').toLowerCase();
+  const plat = (navigator.platform || '').toLowerCase();
+  if (ua.includes('android') || plat.includes('android')) return 'ANDROID';
+  if (ua.includes('iphone') || ua.includes('ipad') || plat.includes('iphone') || plat.includes('ipad'))
+    return 'IOS';
+  if (plat.includes('win') || ua.includes('windows')) return 'WINDOWS';
+  if (plat.includes('mac') || ua.includes('macintosh')) return 'MACOS';
+  if (ua.includes('cros')) return 'CHROMEOS';
+  if (plat.includes('linux') || ua.includes('linux')) return 'LINUX';
+  return 'DEVICE';
+}
+
+export async function detectIncognitoBrowsing(): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
   try {
-    const canvas = document.createElement('canvas');
-    canvas.width = 220;
-    canvas.height = 48;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return 'no-canvas';
-    ctx.textBaseline = 'top';
-    ctx.font = '14px monospace';
-    ctx.fillStyle = '#ec4899';
-    ctx.fillRect(10, 4, 90, 24);
-    ctx.fillStyle = '#0ea5e9';
-    ctx.fillText('ZENTRO-HW-MAC-LOCK', 6, 12);
-    return canvas.toDataURL().slice(-64);
+    // 1. Chromium (Chrome, Edge, Brave, Opera) FileSystem API check
+    const fsReq =
+      (window as any).RequestFileSystem || (window as any).webkitRequestFileSystem;
+    if (typeof fsReq === 'function') {
+      const isPrivateFs = await new Promise<boolean>((resolve) => {
+        fsReq(
+          (window as any).TEMPORARY || 0,
+          100,
+          () => resolve(false),
+          () => resolve(true)
+        );
+      });
+      if (isPrivateFs) return true;
+    }
+
+    // 2. Storage Quota Heuristic for Modern Chromium Incognito Mode
+    if (navigator.storage && typeof navigator.storage.estimate === 'function') {
+      const { quota } = await navigator.storage.estimate();
+      // In Chromium Incognito mode, storage quota is capped significantly lower (typically < 250MB - 500MB on desktop/mobile)
+      // whereas normal browsing allocates several GBs (often > 2GB)
+      if (typeof quota === 'number' && quota > 0 && quota < 180 * 1024 * 1024) {
+        return true;
+      }
+    }
+
+    // 3. Firefox Private Browsing IndexedDB check
+    if (
+      typeof indexedDB !== 'undefined' &&
+      /firefox/i.test(navigator.userAgent || '')
+    ) {
+      const isFfPrivate = await new Promise<boolean>((resolve) => {
+        try {
+          const dbReq = indexedDB.open('zentro_incognito_probe');
+          dbReq.onerror = () => resolve(true);
+          dbReq.onsuccess = () => {
+            try {
+              dbReq.result.close();
+            } catch {
+              // ignore
+            }
+            resolve(false);
+          };
+        } catch {
+          resolve(true);
+        }
+      });
+      if (isFfPrivate) return true;
+    }
   } catch {
-    return 'canvas-fallback';
+    // ignore
   }
+  return false;
 }
 
 export function getDeterministicDeviceAndMac(): {
@@ -355,30 +408,28 @@ export function getDeterministicDeviceAndMac(): {
     typeof Intl !== 'undefined'
       ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
       : 'UTC';
-  const canvasSig = typeof document !== 'undefined' ? computeCanvasHardwareSignature() : 'srv';
 
-  const rawHardwareEntropy = [
-    nav.userAgent || 'ua',
-    nav.platform || 'plat',
-    `${scr.width || 1920}x${scr.height || 1080}x${scr.colorDepth || 24}`,
-    String(nav.hardwareConcurrency || 4),
-    String((nav as any).deviceMemory || 8),
+  // Browser-independent physical device metrics so Chrome, Firefox, Edge, Safari, Brave & Incognito on the same device yield the EXACT SAME Device ID & MAC
+  const osFamily = getNormalizedOsFamily();
+  const maxDim = Math.max(Number(scr.width) || 1920, Number(scr.height) || 1080);
+  const minDim = Math.min(Number(scr.width) || 1920, Number(scr.height) || 1080);
+  const colorDepth = Number(scr.colorDepth) || 24;
+  const dpr =
+    typeof window !== 'undefined' && window.devicePixelRatio
+      ? Number(window.devicePixelRatio).toFixed(2)
+      : '1.00';
+  const touchClass = (Number(nav.maxTouchPoints) || 0) > 0 ? 'TOUCH' : 'NONTOUCH';
+
+  const crossBrowserHardwareEntropy = [
+    osFamily,
+    `${maxDim}x${minDim}x${colorDepth}`,
+    `DPR:${dpr}`,
     tz,
-    canvasSig,
+    touchClass,
   ].join('|');
 
-  const h1 = hashStringDeterministic(rawHardwareEntropy, 0x811c9dc5);
-  const h2 = hashStringDeterministic(rawHardwareEntropy, 0x9e3779b9);
-
-  // Persist hardware device ID & MAC so they stay locked across sessions on this device
-  let savedDeviceId = '';
-  let savedMac = '';
-  try {
-    savedDeviceId = localStorage.getItem('zentro_hw_device_id_v1') || '';
-    savedMac = localStorage.getItem('zentro_hw_mac_id_v1') || '';
-  } catch {
-    // ignore
-  }
+  const h1 = hashStringDeterministic(crossBrowserHardwareEntropy, 0x811c9dc5);
+  const h2 = hashStringDeterministic(crossBrowserHardwareEntropy, 0x9e3779b9);
 
   const computedDeviceId = `ZNT-DEV-${h1.toString(16).toUpperCase().padStart(8, '0')}`;
   const macBytes = [
@@ -391,8 +442,9 @@ export function getDeterministicDeviceAndMac(): {
   ].map((b) => b.toString(16).toUpperCase().padStart(2, '0'));
   const computedMac = macBytes.join(':');
 
-  const deviceId = savedDeviceId || computedDeviceId;
-  const macAddress = savedMac || computedMac;
+  // Always use the cross-browser deterministic hardware ID & MAC so switching browsers or opening Incognito cannot change the ID
+  const deviceId = computedDeviceId;
+  const macAddress = computedMac;
 
   try {
     localStorage.setItem('zentro_hw_device_id_v1', deviceId);
@@ -401,23 +453,27 @@ export function getDeterministicDeviceAndMac(): {
     // ignore
   }
 
-  const platformName = nav.platform || 'Device';
-  const cores = nav.hardwareConcurrency ? `${nav.hardwareConcurrency}C` : '';
-  const resLabel = `${scr.width || 0}x${scr.height || 0}`;
-
   return {
     deviceId,
     macAddress,
-    hardwareSummary: `${platformName} ${cores} (${resLabel})`.trim(),
+    hardwareSummary: `${osFamily} ${maxDim}x${minDim} @${dpr}x (${touchClass})`,
     timezoneLocation: tz,
   };
 }
 
 export async function collectDeviceSecurityTelemetry(): Promise<DeviceSecurityTelemetry> {
   const base = getDeterministicDeviceAndMac();
-  let ipAddress = localStorage.getItem('zentro_tracked_ip_v1') || '';
-  let location = localStorage.getItem('zentro_tracked_loc_v1') || base.timezoneLocation;
-  let macAddress = base.macAddress;
+  const isIncognito = await detectIncognitoBrowsing();
+  let ipAddress = '';
+  let location = base.timezoneLocation;
+  const macAddress = base.macAddress;
+
+  try {
+    ipAddress = localStorage.getItem('zentro_tracked_ip_v1') || '';
+    location = localStorage.getItem('zentro_tracked_loc_v1') || base.timezoneLocation;
+  } catch {
+    // ignore
+  }
 
   try {
     const srvRes = await fetch('/api/security/device-telemetry');
@@ -425,9 +481,6 @@ export async function collectDeviceSecurityTelemetry(): Promise<DeviceSecurityTe
       const srvData = await srvRes.json();
       if (srvData.ipAddress && srvData.ipAddress !== '127.0.0.1' && srvData.ipAddress !== '::1') {
         ipAddress = srvData.ipAddress;
-      }
-      if (srvData.serverMac && !localStorage.getItem('zentro_hw_mac_id_v1')) {
-        macAddress = srvData.serverMac;
       }
     }
   } catch {
@@ -480,6 +533,7 @@ export async function collectDeviceSecurityTelemetry(): Promise<DeviceSecurityTe
     ipAddress,
     location,
     hardwareSummary: base.hardwareSummary,
+    isIncognito,
   };
 }
 
@@ -494,6 +548,22 @@ export interface DeviceAccountLockRecord {
   lockedAt: string;
 }
 
+function readDeviceLockCookie(): DeviceAccountLockRecord | null {
+  if (typeof document === 'undefined') return null;
+  try {
+    const match = document.cookie
+      .split('; ')
+      .find((row) => row.startsWith('zentro_device_lock_v1='));
+    if (!match) return null;
+    const val = decodeURIComponent(match.split('=')[1] || '');
+    const parsed = JSON.parse(val);
+    if (parsed && parsed.username) return parsed;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export function getExistingDeviceAccountLock(
   telemetry?: Partial<DeviceSecurityTelemetry>
 ): DeviceAccountLockRecord | null {
@@ -503,13 +573,32 @@ export function getExistingDeviceAccountLock(
     const targetMac = telemetry?.macAddress || hw.macAddress;
     const targetIp = telemetry?.ipAddress || localStorage.getItem('zentro_tracked_ip_v1') || '';
 
-    // 1. Check dedicated hardware lock entry
-    const rawLock = localStorage.getItem('zentro_device_account_lock_v1');
+    // 1. Check dedicated hardware lock entry in localStorage, sessionStorage, or Cookie
+    const rawLock =
+      localStorage.getItem('zentro_device_account_lock_v1') ||
+      (typeof sessionStorage !== 'undefined'
+        ? sessionStorage.getItem('zentro_device_account_lock_v1')
+        : null);
     if (rawLock) {
       const parsed: DeviceAccountLockRecord = JSON.parse(rawLock);
       if (parsed && parsed.username) {
-        return parsed;
+        return {
+          ...parsed,
+          deviceId: targetDeviceId,
+          macAddress: targetMac,
+          ipAddress: targetIp || parsed.ipAddress,
+        };
       }
+    }
+
+    const cookieLock = readDeviceLockCookie();
+    if (cookieLock) {
+      return {
+        ...cookieLock,
+        deviceId: targetDeviceId,
+        macAddress: targetMac,
+        ipAddress: targetIp || cookieLock.ipAddress,
+      };
     }
 
     // 2. Check local accounts database for any account already created on this device/MAC/IP
@@ -532,8 +621,8 @@ export function getExistingDeviceAccountLock(
             uid: matched.uid,
             username: matched.username,
             email: matched.email,
-            deviceId: matched.deviceId || targetDeviceId,
-            macAddress: matched.macAddress || targetMac,
+            deviceId: targetDeviceId,
+            macAddress: targetMac,
             ipAddress: matched.ipAddress || targetIp || 'Tracked IP',
             location: matched.locationTracked || hw.timezoneLocation,
             lockedAt: String(matched.createdAt || new Date().toISOString()),
@@ -548,11 +637,97 @@ export function getExistingDeviceAccountLock(
 }
 
 export function bindDeviceAccountLock(record: DeviceAccountLockRecord): void {
+  const hw = getDeterministicDeviceAndMac();
+  const normalized: DeviceAccountLockRecord = {
+    ...record,
+    deviceId: hw.deviceId,
+    macAddress: hw.macAddress,
+  };
   try {
-    localStorage.setItem('zentro_device_account_lock_v1', JSON.stringify(record));
+    localStorage.setItem('zentro_device_account_lock_v1', JSON.stringify(normalized));
   } catch {
     // ignore
   }
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('zentro_device_account_lock_v1', JSON.stringify(normalized));
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof document !== 'undefined') {
+      const encoded = encodeURIComponent(JSON.stringify(normalized));
+      document.cookie = `zentro_device_lock_v1=${encoded}; path=/; max-age=315360000; SameSite=Lax`;
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export async function syncLocalDeviceLockToServer(
+  telemetry?: DeviceSecurityTelemetry
+): Promise<DeviceAccountLockRecord | null> {
+  const resolvedTelemetry = telemetry || (await collectDeviceSecurityTelemetry());
+  const localLock = getExistingDeviceAccountLock(resolvedTelemetry);
+
+  // If this browser already has a local account/lock, push it to the server so other browsers & Incognito tabs are immediately locked
+  if (localLock) {
+    try {
+      await fetch('/api/security/register-device', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: localLock.uid,
+          username: localLock.username,
+          email: localLock.email,
+          deviceId: resolvedTelemetry.deviceId,
+          macAddress: resolvedTelemetry.macAddress,
+          ipAddress: resolvedTelemetry.ipAddress,
+          location: resolvedTelemetry.location,
+          hardwareSummary: resolvedTelemetry.hardwareSummary,
+        }),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  // Always check server registry (catches accounts created on another browser or before clearing storage / in Incognito)
+  try {
+    const res = await fetch('/api/security/check-device', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: resolvedTelemetry.deviceId,
+        macAddress: resolvedTelemetry.macAddress,
+        ipAddress: resolvedTelemetry.ipAddress,
+        location: resolvedTelemetry.location,
+        hardwareSummary: resolvedTelemetry.hardwareSummary,
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.locked && data.entry) {
+        const serverLock: DeviceAccountLockRecord = {
+          uid: data.entry.uid,
+          username: data.entry.username,
+          email: data.entry.email || '',
+          deviceId: data.entry.deviceId || resolvedTelemetry.deviceId,
+          macAddress: data.entry.macAddress || resolvedTelemetry.macAddress,
+          ipAddress: data.entry.ipAddress || resolvedTelemetry.ipAddress,
+          location: data.entry.location || resolvedTelemetry.location,
+          lockedAt: data.entry.registeredAt || new Date().toISOString(),
+        };
+        bindDeviceAccountLock(serverLock);
+        return serverLock;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return localLock;
 }
 
 export interface DepositCommissionLevel {

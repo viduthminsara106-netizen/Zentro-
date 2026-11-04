@@ -78,10 +78,13 @@ import {
   replaceCurrencyInText,
   tr,
   collectDeviceSecurityTelemetry,
+  detectIncognitoBrowsing,
   getDeterministicDeviceAndMac,
   getExistingDeviceAccountLock,
   bindDeviceAccountLock,
+  syncLocalDeviceLockToServer,
   isAdminCredentials,
+  isValidReferralCodeFormat,
   getUserNotifications,
   pushUserNotification,
   markNotificationAsRead,
@@ -115,6 +118,7 @@ import {
   SponsorCountriesSection,
   VipCommissionComparisonPoster,
 } from './components/SponsorCountriesAndVipPoster';
+import { VipBenefitsPoster } from './components/VipBenefitsPoster';
 
 type MainTab = 'home' | 'team' | 'task' | 'vip' | 'my' | 'support';
 
@@ -477,6 +481,30 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Automatically sync any existing local account or active profile lock to the server registry
+  // so other browsers and Incognito tabs on the same Device / IP / MAC / Location are always blocked
+  useEffect(() => {
+    collectDeviceSecurityTelemetry()
+      .then(async (telemetry) => {
+        if (profile?.uid && profile.uid !== 'ADMIN') {
+          bindDeviceAccountLock({
+            uid: profile.uid,
+            username: profile.username,
+            email: profile.email,
+            deviceId: telemetry.deviceId,
+            macAddress: telemetry.macAddress,
+            ipAddress: telemetry.ipAddress,
+            location: telemetry.location,
+            lockedAt: String(profile.createdAt || new Date().toISOString()),
+          });
+        }
+        await syncLocalDeviceLockToServer(telemetry);
+      })
+      .catch(() => {
+        // ignore
+      });
+  }, [profile?.uid]);
+
   useEffect(() => {
     if (!authReady || !authUser) {
       return;
@@ -640,11 +668,23 @@ export default function App() {
       const telemetry =
         pendingReg.deviceTelemetry || (await collectDeviceSecurityTelemetry());
 
-      // 1. Check local device lock (Device ID, MAC Address, IP Address)
-      const existingDeviceLock = getExistingDeviceAccountLock(telemetry);
+      // 0. Block registration in Incognito / Private Browsing tabs
+      const isIncognitoNow =
+        Boolean(telemetry.isIncognito) || (await detectIncognitoBrowsing());
+      if (isIncognitoNow) {
+        setAuthError(
+          'Incognito / Private browsing tabs cannot be used to create an account. Only 1 account per device, IP, MAC, and location is permitted.'
+        );
+        return;
+      }
+
+      // 1. Check local & cross-browser server device lock (Device ID, MAC Address, IP Address, Location)
+      const existingDeviceLock =
+        getExistingDeviceAccountLock(telemetry) ||
+        (await syncLocalDeviceLockToServer(telemetry));
       if (existingDeviceLock) {
         setAuthError(
-          `Only 1 account can be created per device. This device (Device: ${telemetry.deviceId}, MAC: ${telemetry.macAddress}, IP: ${telemetry.ipAddress}) is already registered to "${existingDeviceLock.username}". Please sign in instead.`
+          `Only 1 account can be created per device, IP, MAC, and location (Cross-Browser & Incognito Protected). This device (Device: ${telemetry.deviceId}, MAC: ${telemetry.macAddress}, IP: ${telemetry.ipAddress}, Location: ${telemetry.location}) is already registered to "${existingDeviceLock.username}". Please sign in instead.`
         );
         return;
       }
@@ -691,6 +731,17 @@ export default function App() {
         return;
       }
 
+      if (
+        !pendingReg.referralCode ||
+        !pendingReg.referralCode.trim() ||
+        !isValidReferralCodeFormat(pendingReg.referralCode)
+      ) {
+        setAuthError(
+          'An Invite Code is required to register. Please open the registration link shared by an active VIP member.'
+        );
+        return;
+      }
+
       // Verify if the referral code belongs to a registered member; if so, they MUST be a VIP member (vipLevel >= 1)
       const referrerAccount = Object.values(accounts).find(
         (acc) =>
@@ -708,7 +759,7 @@ export default function App() {
         .toString(36)
         .slice(2, 7)}`;
 
-      // 2. Register and verify single-device lock on server (IP, MAC, Device ID, Location)
+      // 2. Register and verify single-device lock on server (IP, MAC, Device ID, Location, Hardware Summary)
       try {
         const lockRes = await fetch('/api/security/register-device', {
           method: 'POST',
@@ -718,6 +769,7 @@ export default function App() {
             macAddress: telemetry.macAddress,
             ipAddress: telemetry.ipAddress,
             locationTracked: telemetry.location,
+            hardwareSummary: telemetry.hardwareSummary,
             uid: cleanId,
             username: pendingReg.username.slice(0, 60),
             email: pendingReg.email.slice(0, 120),
@@ -725,6 +777,18 @@ export default function App() {
         });
         if (lockRes.status === 409) {
           const lockData = await lockRes.json();
+          if (lockData?.entry) {
+            bindDeviceAccountLock({
+              uid: lockData.entry.uid,
+              username: lockData.entry.username,
+              email: lockData.entry.email || '',
+              deviceId: lockData.entry.deviceId || telemetry.deviceId,
+              macAddress: lockData.entry.macAddress || telemetry.macAddress,
+              ipAddress: lockData.entry.ipAddress || telemetry.ipAddress,
+              location: lockData.entry.location || telemetry.location,
+              lockedAt: lockData.entry.registeredAt || new Date().toISOString(),
+            });
+          }
           setAuthError(
             lockData?.error ||
               `Only 1 account can be created per device. Existing account: "${lockData?.existingAccount?.username || 'Registered Member'}".`
@@ -3307,6 +3371,14 @@ export default function App() {
                 })}
               </div>
             </div>
+
+            {/* 2.5 Visual 5-Level Commission Breakdown & Side-by-Side VIP Comparison Poster */}
+            <VipBenefitsPoster
+              profile={profile}
+              activeCurrency={activeCurrency}
+              isDark={isDark}
+              onSelectTier={handleUpgradeVip}
+            />
 
             {/* 3. Zentro Bronze, Silver, Gold & Platinum Featured Commission & Benefits Breakdown */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
