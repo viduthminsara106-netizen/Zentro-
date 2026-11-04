@@ -716,7 +716,7 @@ export const DepositAreaModal: React.FC<DepositAreaModalProps> = ({
                   </label>
                   <input
                     type="number"
-                    step="0.01"
+                    step="1"
                     required
                     value={typedAmount}
                     onChange={(e) => {
@@ -736,7 +736,7 @@ export const DepositAreaModal: React.FC<DepositAreaModalProps> = ({
                     </span>
                     {depositType === 'usdt' && (
                       <span className="text-emerald-400">
-                        ≈ {formatCurrencyValue(amountInUsdt, 'USDT')} USDT
+                        ≈ {formatCurrencyValue(amountInLkr, 'USDT')} USDT
                       </span>
                     )}
                   </div>

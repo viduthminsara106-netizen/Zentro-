@@ -234,6 +234,449 @@ app.post('/api/security/register-device', (req, res) => {
   res.json({ ok: true, record });
 });
 
+app.post('/api/security/delete-device', (req, res) => {
+  const { uid, username } = req.body || {};
+  let removedCount = 0;
+  for (const [key, entry] of serverDeviceRegistry.entries()) {
+    const matchUid = Boolean(uid && (key === uid || entry.uid === uid));
+    const matchUsername = Boolean(
+      username &&
+        entry.username &&
+        entry.username.toLowerCase() === String(username).trim().toLowerCase()
+    );
+    if (matchUid || matchUsername) {
+      serverDeviceRegistry.delete(key);
+      removedCount++;
+    }
+  }
+  if (removedCount > 0) {
+    saveDeviceRegistryToDisk();
+  }
+  res.json({ ok: true, removedCount });
+});
+
+// ============================================================================
+// CENTRAL PERSISTENT DATABASE ENGINE (Cross-Device Login, 5-Level Referrals, Admin Sync)
+// ============================================================================
+interface CentralDatabaseSchema {
+  accounts: Record<string, { profile: any; password: string }>;
+  transactions: Record<string, any[]>;
+  bankAccounts: Record<string, any[]>;
+  kycRecords: Record<string, any>;
+  referrals: Record<string, any[]>;
+  depositRequests: Record<string, any[]>;
+  withdrawalRequests: Record<string, any[]>;
+  notifications: Record<string, any[]>;
+  globalBroadcasts: any[];
+  catalogs: {
+    sponsorCountries?: any[];
+    sponsorGlobalStats?: {
+      totalMembersCount: number;
+      totalInvestingLkr: number;
+      totalPayoutLkr: number;
+      updatedAt?: string;
+    };
+    vipTiers?: any[];
+    platformTasks?: any[];
+    vipDayChallenges?: any[];
+    officialDepositBanks?: any[];
+    officialUsdtAddresses?: any[];
+  };
+  deletedUids: string[];
+  updatedAt: string;
+}
+
+const CENTRAL_DB_FILE = path.join(__dirname, '.zentro_central_db.json');
+
+let centralDb: CentralDatabaseSchema = {
+  accounts: {},
+  transactions: {},
+  bankAccounts: {},
+  kycRecords: {},
+  referrals: {},
+  depositRequests: {},
+  withdrawalRequests: {},
+  notifications: {},
+  globalBroadcasts: [],
+  catalogs: {},
+  deletedUids: [],
+  updatedAt: new Date().toISOString(),
+};
+
+function loadCentralDbFromDisk(): void {
+  try {
+    if (fs.existsSync(CENTRAL_DB_FILE)) {
+      const raw = fs.readFileSync(CENTRAL_DB_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        centralDb = {
+          accounts: parsed.accounts || {},
+          transactions: parsed.transactions || {},
+          bankAccounts: parsed.bankAccounts || {},
+          kycRecords: parsed.kycRecords || {},
+          referrals: parsed.referrals || {},
+          depositRequests: parsed.depositRequests || {},
+          withdrawalRequests: parsed.withdrawalRequests || {},
+          notifications: parsed.notifications || {},
+          globalBroadcasts: Array.isArray(parsed.globalBroadcasts) ? parsed.globalBroadcasts : [],
+          catalogs: parsed.catalogs || {},
+          deletedUids: Array.isArray(parsed.deletedUids) ? parsed.deletedUids : [],
+          updatedAt: parsed.updatedAt || new Date().toISOString(),
+        };
+      }
+    }
+  } catch {
+    // ignore read error
+  }
+}
+
+function saveCentralDbToDisk(): void {
+  try {
+    centralDb.updatedAt = new Date().toISOString();
+    fs.writeFileSync(CENTRAL_DB_FILE, JSON.stringify(centralDb, null, 2), 'utf-8');
+  } catch {
+    // ignore write error
+  }
+}
+
+loadCentralDbFromDisk();
+
+function mergeRecordArraysById(existing: any[] = [], incoming: any[] = []): any[] {
+  const map = new Map<string, any>();
+  for (const item of existing) {
+    if (item && item.id) {
+      map.set(String(item.id), item);
+    }
+  }
+  for (const item of incoming) {
+    if (item && item.id) {
+      const prev = map.get(String(item.id));
+      map.set(String(item.id), prev ? { ...prev, ...item } : item);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    const tA = new Date(a.createdAt || a.updatedAt || 0).getTime();
+    const tB = new Date(b.createdAt || b.updatedAt || 0).getTime();
+    return tB - tA;
+  });
+}
+
+// Automatically reconcile 5-level referral downlines across all accounts in centralDb
+function reconcileCentralFiveLevelReferrals(): void {
+  const deletedSet = new Set(centralDb.deletedUids || []);
+  const allEntries = Object.values(centralDb.accounts).filter(
+    (entry) => entry && entry.profile && entry.profile.uid && !deletedSet.has(entry.profile.uid)
+  );
+
+  const byRefCode = new Map<string, { profile: any; password: string }>();
+  for (const entry of allEntries) {
+    const code = String(entry.profile.referralCode || '')
+      .trim()
+      .toUpperCase();
+    if (code) {
+      byRefCode.set(code, entry);
+    }
+  }
+
+  for (const memberEntry of allEntries) {
+    const member = memberEntry.profile;
+    let currentCode = String(member.referredBy || '')
+      .trim()
+      .toUpperCase();
+    const visitedUids = new Set<string>([member.uid]);
+
+    for (let level = 1; level <= 5; level++) {
+      if (!currentCode) break;
+      const uplineEntry = byRefCode.get(currentCode);
+      if (!uplineEntry || !uplineEntry.profile) break;
+      const upline = uplineEntry.profile;
+      if (visitedUids.has(upline.uid)) break;
+      visitedUids.add(upline.uid);
+
+      const uplineRefs: any[] = Array.isArray(centralDb.referrals[upline.uid])
+        ? [...centralDb.referrals[upline.uid]]
+        : [];
+
+      // Check if this downline member already has a registration/team entry at this tierLevel
+      const existingIdx = uplineRefs.findIndex(
+        (r) =>
+          r &&
+          String(r.referredUsername || '').toLowerCase() ===
+            String(member.username || '').toLowerCase() &&
+          Number(r.tierLevel) === level
+      );
+
+      if (existingIdx >= 0) {
+        // Keep vipLevel synced with the downline member's latest VIP level
+        if (Number(member.vipLevel || 0) > Number(uplineRefs[existingIdx].vipLevel || 0)) {
+          uplineRefs[existingIdx] = {
+            ...uplineRefs[existingIdx],
+            vipLevel: Number(member.vipLevel || 0),
+          };
+        }
+      } else {
+        uplineRefs.unshift({
+          id: `ref_tree_${upline.uid}_${member.uid}_L${level}`,
+          referrerUid: upline.uid,
+          referredUsername: member.username,
+          referralCodeUsed: upline.referralCode,
+          tierLevel: level,
+          vipLevel: Number(member.vipLevel || 0),
+          commissionEarned: 0,
+          createdAt: member.createdAt || new Date().toISOString(),
+        });
+      }
+
+      centralDb.referrals[upline.uid] = uplineRefs;
+      currentCode = String(upline.referredBy || '')
+        .trim()
+        .toUpperCase();
+    }
+  }
+}
+
+app.get('/api/db/state', (_req, res) => {
+  reconcileCentralFiveLevelReferrals();
+  res.json({
+    ok: true,
+    db: centralDb,
+  });
+});
+
+app.post('/api/db/sync', (req, res) => {
+  try {
+    const payload = req.body || {};
+    const deletedSet = new Set<string>(centralDb.deletedUids || []);
+
+    if (Array.isArray(payload.deletedUids)) {
+      for (const dUid of payload.deletedUids) {
+        if (dUid) deletedSet.add(String(dUid));
+      }
+      centralDb.deletedUids = Array.from(deletedSet);
+    }
+
+    // 1. Merge accounts
+    if (payload.accounts && typeof payload.accounts === 'object') {
+      for (const [uid, incomingAcc] of Object.entries<any>(payload.accounts)) {
+        if (!uid || deletedSet.has(uid) || !incomingAcc?.profile) continue;
+        const existingAcc = centralDb.accounts[uid];
+        if (!existingAcc) {
+          centralDb.accounts[uid] = {
+            profile: incomingAcc.profile,
+            password: incomingAcc.password || 'zentro123',
+          };
+        } else {
+          const existingTime = new Date(
+            existingAcc.profile?.updatedAt || existingAcc.profile?.createdAt || 0
+          ).getTime();
+          const incomingTime = new Date(
+            incomingAcc.profile?.updatedAt || incomingAcc.profile?.createdAt || 0
+          ).getTime();
+
+          // Take newer profile or force-overwrite if requested by admin
+          if (payload.forceOverwrite || incomingTime >= existingTime) {
+            centralDb.accounts[uid] = {
+              profile: {
+                ...existingAcc.profile,
+                ...incomingAcc.profile,
+                highestVipLevel: Math.max(
+                  Number(existingAcc.profile?.highestVipLevel || 0),
+                  Number(incomingAcc.profile?.highestVipLevel || 0),
+                  Number(incomingAcc.profile?.vipLevel || 0)
+                ),
+              },
+              password: incomingAcc.password || existingAcc.password || 'zentro123',
+            };
+          }
+        }
+      }
+    }
+
+    // Remove any deleted accounts
+    for (const delUid of deletedSet) {
+      delete centralDb.accounts[delUid];
+      delete centralDb.transactions[delUid];
+      delete centralDb.bankAccounts[delUid];
+      delete centralDb.kycRecords[delUid];
+      delete centralDb.referrals[delUid];
+      delete centralDb.depositRequests[delUid];
+      delete centralDb.withdrawalRequests[delUid];
+      delete centralDb.notifications[delUid];
+    }
+
+    // 2. Merge per-user arrays
+    const mergeMapList = (
+      targetMap: Record<string, any[]>,
+      incomingMap?: Record<string, any[]>
+    ) => {
+      if (!incomingMap || typeof incomingMap !== 'object') return;
+      for (const [uid, list] of Object.entries(incomingMap)) {
+        if (!uid || deletedSet.has(uid) || !Array.isArray(list)) continue;
+        targetMap[uid] = mergeRecordArraysById(targetMap[uid] || [], list);
+      }
+    };
+
+    mergeMapList(centralDb.transactions, payload.transactions);
+    mergeMapList(centralDb.bankAccounts, payload.bankAccounts);
+    mergeMapList(centralDb.referrals, payload.referrals);
+    mergeMapList(centralDb.depositRequests, payload.depositRequests);
+    mergeMapList(centralDb.withdrawalRequests, payload.withdrawalRequests);
+    mergeMapList(centralDb.notifications, payload.notifications);
+
+    // 3. Merge KYC records
+    if (payload.kycRecords && typeof payload.kycRecords === 'object') {
+      for (const [uid, kyc] of Object.entries<any>(payload.kycRecords)) {
+        if (!uid || deletedSet.has(uid) || !kyc) continue;
+        const prev = centralDb.kycRecords[uid];
+        if (!prev) {
+          centralDb.kycRecords[uid] = kyc;
+        } else {
+          const prevTime = new Date(prev.updatedAt || prev.createdAt || 0).getTime();
+          const nextTime = new Date(kyc.updatedAt || kyc.createdAt || 0).getTime();
+          if (payload.forceOverwrite || nextTime >= prevTime) {
+            centralDb.kycRecords[uid] = { ...prev, ...kyc };
+          }
+        }
+      }
+    }
+
+    // 4. Merge Global Broadcasts
+    if (Array.isArray(payload.globalBroadcasts)) {
+      if (payload.forceOverwrite) {
+        centralDb.globalBroadcasts = payload.globalBroadcasts;
+      } else {
+        centralDb.globalBroadcasts = mergeRecordArraysById(
+          centralDb.globalBroadcasts || [],
+          payload.globalBroadcasts
+        );
+      }
+    }
+
+    // 5. Merge Catalogs (Sponsor Countries, Global Stats, VIP Tiers, Tasks, Banks, USDT)
+    if (payload.catalogs && typeof payload.catalogs === 'object') {
+      centralDb.catalogs = {
+        ...centralDb.catalogs,
+        ...payload.catalogs,
+      };
+    }
+
+    reconcileCentralFiveLevelReferrals();
+    saveCentralDbToDisk();
+
+    res.json({
+      ok: true,
+      db: centralDb,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to sync central database.' });
+  }
+});
+
+app.post('/api/db/delete-user', (req, res) => {
+  try {
+    const { uid, username } = req.body || {};
+    if (!uid) {
+      res.status(400).json({ error: 'Missing uid to delete.' });
+      return;
+    }
+
+    if (!centralDb.deletedUids.includes(uid)) {
+      centralDb.deletedUids.push(uid);
+    }
+
+    delete centralDb.accounts[uid];
+    delete centralDb.transactions[uid];
+    delete centralDb.bankAccounts[uid];
+    delete centralDb.kycRecords[uid];
+    delete centralDb.referrals[uid];
+    delete centralDb.depositRequests[uid];
+    delete centralDb.withdrawalRequests[uid];
+    delete centralDb.notifications[uid];
+
+    // Also remove from server device lock registry so the device is unlocked if needed
+    for (const [key, entry] of serverDeviceRegistry.entries()) {
+      const matchUid = key === uid || entry.uid === uid;
+      const matchUsername = Boolean(
+        username &&
+          entry.username &&
+          entry.username.toLowerCase() === String(username).trim().toLowerCase()
+      );
+      if (matchUid || matchUsername) {
+        serverDeviceRegistry.delete(key);
+      }
+    }
+    saveDeviceRegistryToDisk();
+    saveCentralDbToDisk();
+
+    res.json({
+      ok: true,
+      deletedUid: uid,
+      db: centralDb,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to delete user.' });
+  }
+});
+
+app.post('/api/db/login', (req, res) => {
+  try {
+    const { identifier, password } = req.body || {};
+    const queryStr = String(identifier || '')
+      .trim()
+      .toLowerCase();
+    const queryDigits = queryStr.replace(/[^0-9]/g, '');
+
+    if (!queryStr) {
+      res.status(400).json({ error: 'Please enter your username, email, or mobile number.' });
+      return;
+    }
+
+    reconcileCentralFiveLevelReferrals();
+    const deletedSet = new Set(centralDb.deletedUids || []);
+
+    const matched = Object.values(centralDb.accounts).find((acc) => {
+      if (!acc || !acc.profile || deletedSet.has(acc.profile.uid)) return false;
+      const uMobileDigits = String(acc.profile.mobile || '').replace(/[^0-9]/g, '');
+      const fullPhoneDigits = `${String(acc.profile.countryCode || '').replace(/[^0-9]/g, '')}${uMobileDigits}`;
+      return (
+        String(acc.profile.username || '').toLowerCase() === queryStr ||
+        String(acc.profile.email || '').toLowerCase() === queryStr ||
+        (queryDigits.length >= 6 &&
+          (uMobileDigits === queryDigits ||
+            fullPhoneDigits === queryDigits ||
+            uMobileDigits.endsWith(queryDigits.slice(-9))))
+      );
+    });
+
+    if (!matched) {
+      res.status(404).json({ error: 'Account not found in database.' });
+      return;
+    }
+
+    if (String(matched.password) !== String(password)) {
+      res.status(401).json({ error: 'Incorrect password. Please check your password and try again.' });
+      return;
+    }
+
+    const uid = matched.profile.uid;
+    res.json({
+      ok: true,
+      uid,
+      account: matched,
+      transactions: centralDb.transactions[uid] || [],
+      bankAccounts: centralDb.bankAccounts[uid] || [],
+      kycRecord: centralDb.kycRecords[uid] || null,
+      referrals: centralDb.referrals[uid] || [],
+      depositRequests: centralDb.depositRequests[uid] || [],
+      withdrawalRequests: centralDb.withdrawalRequests[uid] || [],
+      notifications: centralDb.notifications[uid] || [],
+      db: centralDb,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Database login failed.' });
+  }
+});
+
 // ============================================================================
 // REAL-TIME MULTI-USER & ADMIN LIVE CHAT ENGINE (Server-Authoritative + SSE)
 // ============================================================================

@@ -97,6 +97,11 @@ import {
   saveLocalKycRequest,
   getHighestVipLevel,
   recordHighestVipLevel,
+  reconcileFiveLevelReferralTreesLocal,
+  recordFiveLevelReferralOnRegistration,
+  distributeFiveLevelVipAndDepositCommissions,
+  syncCentralDatabaseWithServer,
+  loginUserViaCentralDatabase,
   ZENTRO_ATRIUM_BG_DATA_URI,
   ZENTRO_ATRIUM_LIGHT_BG_DATA_URI,
 } from './types';
@@ -427,6 +432,7 @@ export default function App() {
       if (refList !== undefined) {
         localStorage.setItem(`zentro_refs_${userProfile.uid}`, JSON.stringify(refList));
       }
+      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     } catch (e) {
       console.error('Error saving local account record:', e);
     }
@@ -434,6 +440,7 @@ export default function App() {
 
   const loadSessionFromStorage = (uid: string) => {
     try {
+      reconcileFiveLevelReferralTreesLocal();
       const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
       const accounts = rawAccounts ? JSON.parse(rawAccounts) : {};
       const entry = accounts[uid];
@@ -444,7 +451,8 @@ export default function App() {
       const savedBanks = localStorage.getItem(`zentro_banks_${uid}`);
       setBankAccounts(savedBanks ? JSON.parse(savedBanks) : []);
       const savedKyc = localStorage.getItem(`zentro_kyc_${uid}`);
-      setKycRecord(savedKyc ? JSON.parse(savedKyc) : null);
+      const storedKyc = getLocalKycRequestByUser(uid);
+      setKycRecord(storedKyc || (savedKyc ? JSON.parse(savedKyc) : null));
       const savedRefs = localStorage.getItem(`zentro_refs_${uid}`);
       setReferrals(savedRefs ? JSON.parse(savedRefs) : []);
       return true;
@@ -452,6 +460,26 @@ export default function App() {
       return false;
     }
   };
+
+  // Continuous central database synchronization across devices & browsers
+  useEffect(() => {
+    syncCentralDatabaseWithServer().catch(() => {});
+    const interval = setInterval(() => {
+      syncCentralDatabaseWithServer().catch(() => {});
+    }, 10000);
+
+    const handleDbSynced = () => {
+      const activeUid = localStorage.getItem('zentro_active_session_uid');
+      if (activeUid && !authUser) {
+        loadSessionFromStorage(activeUid);
+      }
+    };
+    window.addEventListener('zentro-db-synced', handleDbSynced);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('zentro-db-synced', handleDbSynced);
+    };
+  }, [authUser]);
 
   useEffect(() => {
     const unsubscribe = initAuth(async (user) => {
@@ -481,12 +509,16 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Automatically sync any existing local account or active profile lock to the server registry
-  // so other browsers and Incognito tabs on the same Device / IP / MAC / Location are always blocked
+  // Sync local registration device lock to server registry without blocking cross-device login
   useEffect(() => {
     collectDeviceSecurityTelemetry()
       .then(async (telemetry) => {
-        if (profile?.uid && profile.uid !== 'ADMIN') {
+        if (
+          profile?.uid &&
+          profile.uid !== 'ADMIN' &&
+          profile.deviceId &&
+          profile.deviceId === telemetry.deviceId
+        ) {
           bindDeviceAccountLock({
             uid: profile.uid,
             username: profile.username,
@@ -503,7 +535,7 @@ export default function App() {
       .catch(() => {
         // ignore
       });
-  }, [profile?.uid]);
+  }, [profile?.uid, profile?.deviceId]);
 
   useEffect(() => {
     if (!authReady || !authUser) {
@@ -665,6 +697,9 @@ export default function App() {
     setIsSubmittingAuth(true);
     setAuthError(null);
     try {
+      // Pull latest central database accounts first so referral codes from any device work
+      await syncCentralDatabaseWithServer().catch(() => {});
+
       const telemetry =
         pendingReg.deviceTelemetry || (await collectDeviceSecurityTelemetry());
 
@@ -694,15 +729,18 @@ export default function App() {
         ? JSON.parse(rawAccounts)
         : {};
 
-      // Also check if any existing account in local registry has already been created on this device/MAC/IP
+      // Check if any existing account in registry was already created on THIS specific device/MAC/IP
       const existingDeviceAccount = Object.values(accounts).find(
         (acc) =>
-          (acc.profile.deviceId && acc.profile.deviceId === telemetry.deviceId) ||
-          (acc.profile.macAddress && acc.profile.macAddress === telemetry.macAddress) ||
-          (acc.profile.ipAddress &&
-            telemetry.ipAddress !== '127.0.0.1' &&
-            acc.profile.ipAddress === telemetry.ipAddress) ||
-          Object.keys(accounts).length >= 1
+          acc?.profile &&
+          ((acc.profile.deviceId && acc.profile.deviceId === telemetry.deviceId) ||
+            (acc.profile.macAddress &&
+              acc.profile.macAddress !== '00:1A:2B:3C:4D:5E' &&
+              acc.profile.macAddress === telemetry.macAddress) ||
+            (acc.profile.ipAddress &&
+              acc.profile.ipAddress !== 'Admin Created' &&
+              telemetry.ipAddress !== '127.0.0.1' &&
+              acc.profile.ipAddress === telemetry.ipAddress))
       );
       if (existingDeviceAccount) {
         bindDeviceAccountLock({
@@ -723,8 +761,9 @@ export default function App() {
 
       const duplicate = Object.values(accounts).find(
         (acc) =>
-          acc.profile.username.toLowerCase() === pendingReg.username.toLowerCase() ||
-          acc.profile.email.toLowerCase() === pendingReg.email.toLowerCase()
+          acc?.profile &&
+          (acc.profile.username.toLowerCase() === pendingReg.username.toLowerCase() ||
+            acc.profile.email.toLowerCase() === pendingReg.email.toLowerCase())
       );
       if (duplicate) {
         setAuthError('An account with this user name or email already exists. Please Sign in.');
@@ -745,8 +784,9 @@ export default function App() {
       // Verify if the referral code belongs to a registered member; if so, they MUST be a VIP member (vipLevel >= 1)
       const referrerAccount = Object.values(accounts).find(
         (acc) =>
+          acc?.profile &&
           acc.profile.referralCode.toUpperCase() ===
-          pendingReg.referralCode.trim().toUpperCase()
+            pendingReg.referralCode.trim().toUpperCase()
       );
       if (referrerAccount && referrerAccount.profile.vipLevel < 1) {
         setAuthError(
@@ -819,7 +859,7 @@ export default function App() {
         locationTracked: telemetry.location.slice(0, 120),
         securityPasswordHash: pendingReg.securityPassword.slice(0, 128),
         referralCode: generatedRefCode,
-        referredBy: pendingReg.referralCode.slice(0, 32),
+        referredBy: pendingReg.referralCode.trim().toUpperCase().slice(0, 32),
         vipLevel: 0,
         balance: 100.0,
         totalEarnings: 0,
@@ -835,61 +875,9 @@ export default function App() {
         type: 'referral_bonus',
         amount: 100.0,
         status: 'completed',
-        description: `Welcome Invitee Bonus (${pendingReg.referralCode})`,
+        description: `Welcome Invitee Bonus (${pendingReg.referralCode.trim().toUpperCase()})`,
         createdAt: new Date().toISOString(),
       };
-
-      // If referred by an active VIP member (vipLevel >= 1), credit 10 LKR (Bronze), 30 LKR (Silver), 50 LKR (Gold), or 100 LKR (Platinum)
-      if (referrerAccount && referrerAccount.profile.vipLevel >= 1) {
-        const refRecord = accounts[referrerAccount.profile.uid] as any;
-        if (refRecord && refRecord.profile) {
-          const friendRegBonus = getFriendRegistrationBonusForVip(refRecord.profile.vipLevel);
-          const updatedRefProfile: UserProfile = {
-            ...refRecord.profile,
-            balance: Number((refRecord.profile.balance + friendRegBonus).toFixed(2)),
-            totalEarnings: Number((refRecord.profile.totalEarnings + friendRegBonus).toFixed(2)),
-            updatedAt: new Date().toISOString(),
-          };
-          const friendRefEntry: ReferralRecordData = {
-            id: `ref_${Date.now()}_reg`,
-            referrerUid: refRecord.profile.uid,
-            referredUsername: pendingReg.username.slice(0, 60),
-            referralCodeUsed: refRecord.profile.referralCode,
-            tierLevel: 1,
-            vipLevel: 0,
-            commissionEarned: friendRegBonus,
-            createdAt: new Date().toISOString(),
-          };
-          const friendBonusTx: TransactionRecord = {
-            id: `tx_${Date.now()}_reg`,
-            userId: refRecord.profile.uid,
-            type: 'referral_bonus',
-            amount: friendRegBonus,
-            status: 'completed',
-            description: `1 Friend Registration Bonus (+${friendRegBonus} LKR — ${pendingReg.username.slice(0, 40)})`,
-            createdAt: new Date().toISOString(),
-          };
-          saveLocalUserRecord(
-            updatedRefProfile,
-            refRecord.password,
-            [friendBonusTx, ...(refRecord.transactions || [])],
-            refRecord.bankAccounts,
-            refRecord.kycRecord,
-            [friendRefEntry, ...(refRecord.referrals || [])]
-          );
-          pushUserNotification(refRecord.profile.uid, {
-            title: `New Friend Registered: +${friendRegBonus} LKR Bonus!`,
-            titleSi: `නව මිතුරෙකු ලියාපදිංචි විය: +${friendRegBonus} LKR ප්‍රසාද දීමනාව!`,
-            message: `${pendingReg.username.slice(0, 40)} registered using your referral code (${refRecord.profile.referralCode}). +${friendRegBonus} LKR has been credited to your wallet.`,
-            messageSi: `${pendingReg.username.slice(0, 40)} ඔබගේ යොමු කේතය භාවිතා කර ලියාපදිංචි විය. +${friendRegBonus} LKR ඔබගේ ගිණුමට එක් කරන ලදී.`,
-            category: 'referral',
-            priority: 'high',
-            actionTab: 'team',
-            actionLabel: 'View Team',
-            actionLabelSi: 'කණ්ඩායම බලන්න',
-          });
-        }
-      }
 
       bindDeviceAccountLock({
         uid: cleanId,
@@ -901,7 +889,12 @@ export default function App() {
         location: telemetry.location,
         lockedAt: new Date().toISOString(),
       });
+
       saveLocalUserRecord(newProfile, pendingReg.password, [welcomeTx], [], null, []);
+      // Track 5-level referral chain (L1-L5) across all 5 uplines and credit L1 Friend Registration Bonus
+      recordFiveLevelReferralOnRegistration(newProfile);
+      await syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+
       localStorage.setItem('zentro_active_session_uid', cleanId);
       setProfile(newProfile);
       setTransactions([welcomeTx]);
@@ -943,6 +936,23 @@ export default function App() {
         return;
       }
 
+      // 2. Sync with central server database first so accounts created on ANY device can log in on this device
+      await syncCentralDatabaseWithServer().catch(() => {});
+
+      const centralAuth = await loginUserViaCentralDatabase(
+        loginData.identifier,
+        loginData.password
+      );
+      if (centralAuth.ok && centralAuth.uid && centralAuth.profile) {
+        localStorage.setItem('zentro_active_session_uid', centralAuth.uid);
+        loadSessionFromStorage(centralAuth.uid);
+        if (!isProfileSetupComplete(centralAuth.profile)) {
+          setActiveTab('my');
+        }
+        return;
+      }
+
+      // 3. Fallback to local accounts storage if offline or local-only
       const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
       const accounts: Record<string, { profile: UserProfile; password: string }> = rawAccounts
         ? JSON.parse(rawAccounts)
@@ -951,6 +961,7 @@ export default function App() {
       const queryStr = loginData.identifier.trim().toLowerCase();
       const queryDigits = queryStr.replace(/[^0-9]/g, '');
       const matched = Object.values(accounts).find((acc) => {
+        if (!acc?.profile) return false;
         const uMobileDigits = (acc.profile.mobile || '').replace(/[^0-9]/g, '');
         return (
           acc.profile.username.toLowerCase() === queryStr ||
@@ -962,7 +973,11 @@ export default function App() {
       });
 
       if (!matched) {
-        setAuthError('Account not found. Please register your Zentro account first.');
+        setAuthError(
+          centralAuth.error && centralAuth.error !== 'Unable to reach central server database.'
+            ? centralAuth.error
+            : 'Account not found. Please register your Zentro account first.'
+        );
         return;
       }
 
@@ -1316,6 +1331,15 @@ export default function App() {
         setTransactions(nextTx);
       }
       saveLocalUserRecord(updatedProfile, undefined, nextTx);
+
+      // Update downline VIP status across all 5 uplines (L1-L5) & distribute 5-level commissions if upgrading to a higher tier
+      distributeFiveLevelVipAndDepositCommissions(
+        updatedProfile,
+         !isDowngradeForTasks ? tier.unlockAmount : 0,
+        `${tier.name} (VIP ${tier.level}) Activation`,
+        !isDowngradeForTasks
+      );
+      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
 
       pushUserNotification(profile.uid, {
         title: `VIP Activated: ${tier.name} (VIP ${tier.level})!`,

@@ -22,7 +22,9 @@ import {
   LogOut,
   Megaphone,
   Moon,
+  Plus,
   RefreshCw,
+  Save,
   Search,
   Send,
   ShieldCheck,
@@ -31,6 +33,7 @@ import {
   Trash2,
   TrendingUp,
   Unlock,
+  UserPlus,
   Users,
   Wallet,
   X,
@@ -57,6 +60,8 @@ import {
   ZENTRO_ATRIUM_LIGHT_BG_DATA_URI,
   ZENTRO_LOGO_URL,
   deleteGlobalBroadcastNotification,
+  deleteUserFromCentralDatabaseAndLocal,
+  distributeFiveLevelVipAndDepositCommissions,
   formatCurrencyValue,
   formatSiteAmount,
   getActiveCurrency,
@@ -68,10 +73,14 @@ import {
   getLocalWithdrawalRequests,
   getOfficialDepositBanks,
   getOfficialUsdtAddresses,
+  getPlatformSponsorGlobalStats,
   pushGlobalBroadcastNotification,
   pushUserNotification,
+  recordFiveLevelReferralOnRegistration,
   saveOfficialDepositBanks,
   saveOfficialUsdtAddresses,
+  savePlatformSponsorGlobalStats,
+  syncCentralDatabaseWithServer,
   updateGlobalBroadcastNotification,
   updateLocalDepositRequestStatus,
   updateLocalKycRequestStatus,
@@ -167,6 +176,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   } | null>(null);
   const [viewingUserBanksModal, setViewingUserBanksModal] =
     useState<AdminUserBundle | null>(null);
+
+  // Admin Add User & Delete User states + Quick All Members Count state
+  const [isAddUserModalOpen, setIsAddUserModalOpen] = useState<boolean>(false);
+  const [newUsername, setNewUsername] = useState<string>('');
+  const [newEmail, setNewEmail] = useState<string>('');
+  const [newCountryCode, setNewCountryCode] = useState<string>('🇱🇰 +94');
+  const [newMobile, setNewMobile] = useState<string>('');
+  const [newPassword, setNewPassword] = useState<string>('zentro123');
+  const [newSecurityPin, setNewSecurityPin] = useState<string>('888888');
+  const [newCountry, setNewCountry] = useState<string>('Sri Lanka');
+  const [newCurrency, setNewCurrency] = useState<string>('LKR');
+  const [newVipLevel, setNewVipLevel] = useState<number>(1);
+  const [newBalanceLkr, setNewBalanceLkr] = useState<string>('100');
+  const [newKycStatus, setNewKycStatus] = useState<'unverified' | 'pending' | 'verified'>('verified');
+  const [newReferredBy, setNewReferredBy] = useState<string>('ZENTRO-VIP888');
+
+  const [deletingUserBundle, setDeletingUserBundle] = useState<AdminUserBundle | null>(null);
+  const [quickAllMembersCount, setQuickAllMembersCount] = useState<string>(() =>
+    String(getPlatformSponsorGlobalStats().totalMembersCount)
+  );
 
   // Admin Notification & Broadcast composer state
   const [notifTargetUid, setNotifTargetUid] = useState<string>('ALL');
@@ -313,9 +342,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   useEffect(() => {
     loadAllAdminData();
+    syncCentralDatabaseWithServer().then(() => {
+      loadAllAdminData();
+      setQuickAllMembersCount(String(getPlatformSponsorGlobalStats().totalMembersCount));
+    });
     const onKycUpdated = () => loadAllAdminData();
+    const onDbSynced = () => {
+      loadAllAdminData();
+      setQuickAllMembersCount(String(getPlatformSponsorGlobalStats().totalMembersCount));
+    };
+    const onCatalogUpdated = () => {
+      setQuickAllMembersCount(String(getPlatformSponsorGlobalStats().totalMembersCount));
+    };
     window.addEventListener('zentro-kyc-updated', onKycUpdated);
-    return () => window.removeEventListener('zentro-kyc-updated', onKycUpdated);
+    window.addEventListener('zentro-db-synced', onDbSynced);
+    window.addEventListener('zentro-catalog-updated', onCatalogUpdated);
+    return () => {
+      window.removeEventListener('zentro-kyc-updated', onKycUpdated);
+      window.removeEventListener('zentro-db-synced', onDbSynced);
+      window.removeEventListener('zentro-catalog-updated', onCatalogUpdated);
+    };
   }, []);
 
   // ================= ADMIN KYC APPROVE / REJECT / PROCESSING HANDLER =================
@@ -412,12 +458,157 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       }
 
       loadAllAdminData();
+      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
       if (onAdminMutateUser) {
         onAdminMutateUser(uid);
       }
     } catch (e) {
       console.error('Error persisting admin user update:', e);
     }
+  };
+
+  // ================= ADMIN ADD NEW USER & DELETE USER HANDLERS =================
+  const handleCreateNewUserByAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanUsername = newUsername.trim();
+    const cleanEmail =
+      newEmail.trim() || `${cleanUsername.toLowerCase().replace(/[^a-z0-9]/g, '')}@zentro.io`;
+    const cleanMobile = newMobile.trim() || '770000000';
+    const cleanPassword = newPassword.trim() || 'zentro123';
+    const cleanPin = newSecurityPin.trim() || '888888';
+
+    if (!cleanUsername) {
+      showAdminNotice('Please enter a username for the new user.');
+      return;
+    }
+
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    const accounts: Record<string, { profile: UserProfile; password: string }> =
+      rawAccounts ? JSON.parse(rawAccounts) : {};
+
+    const duplicate = Object.values(accounts).find(
+      (acc) =>
+        acc?.profile &&
+        (acc.profile.username.toLowerCase() === cleanUsername.toLowerCase() ||
+          acc.profile.email.toLowerCase() === cleanEmail.toLowerCase())
+    );
+    if (duplicate) {
+      showAdminNotice(`A user with username "${cleanUsername}" or email "${cleanEmail}" already exists.`);
+      return;
+    }
+
+    const uid = `usr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const generatedRefCode = `ZENTRO-${uid
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .slice(-6)
+      .toUpperCase()}`;
+    const initialBal = Math.max(0, Number(Number(newBalanceLkr || 0).toFixed(2)));
+    const nowIso = new Date().toISOString();
+
+    const createdProfile: UserProfile = {
+      uid,
+      username: cleanUsername.slice(0, 60),
+      email: cleanEmail.slice(0, 120),
+      countryCode: newCountryCode.trim() || '🇱🇰 +94',
+      mobile: cleanMobile.slice(0, 30),
+      country: newCountry.trim() || 'Sri Lanka',
+      currency: newCurrency.trim() || 'LKR',
+      language: 'English',
+      deviceId: `ZNT-ADM-${uid.slice(-6).toUpperCase()}`,
+      macAddress: '00:1A:2B:3C:4D:5E',
+      ipAddress: 'Admin Created',
+      locationTracked: `${newCountry.trim() || 'Sri Lanka'} (Admin Created)`,
+      securityPasswordHash: cleanPin.slice(0, 128),
+      referralCode: generatedRefCode,
+      referredBy: (newReferredBy || 'ZENTRO-VIP888').trim().toUpperCase(),
+      vipLevel: Number(newVipLevel) || 0,
+      highestVipLevel: Number(newVipLevel) || 0,
+      balance: initialBal,
+      totalEarnings: 0,
+      tasksCompletedToday: 0,
+      kycStatus: newKycStatus,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    accounts[uid] = {
+      profile: createdProfile,
+      password: cleanPassword,
+    };
+    localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+
+    const initTxList: TransactionRecord[] =
+      initialBal > 0
+        ? [
+            {
+              id: `tx_adm_init_${Date.now()}`,
+              userId: uid,
+              type: 'deposit',
+              amount: initialBal,
+              status: 'completed',
+              description: `Initial Account Balance Credited by Admin (+${initialBal} LKR)`,
+              createdAt: nowIso,
+            },
+          ]
+        : [];
+    localStorage.setItem(`zentro_tx_${uid}`, JSON.stringify(initTxList));
+    localStorage.setItem(`zentro_banks_${uid}`, JSON.stringify([]));
+    localStorage.setItem(`zentro_refs_${uid}`, JSON.stringify([]));
+
+    if (newKycStatus === 'verified') {
+      updateLocalKycRequestStatus(uid, 'verified', 'verified', 'Verified on creation by Admin');
+    }
+
+    // Record L1-L5 referral chain entries across uplines
+    recordFiveLevelReferralOnRegistration(createdProfile);
+    if (createdProfile.vipLevel >= 1) {
+      distributeFiveLevelVipAndDepositCommissions(
+        createdProfile,
+        0,
+        'Admin Created VIP Member',
+        false
+      );
+    }
+
+    await syncCentralDatabaseWithServer({ forceOverwrite: true });
+    loadAllAdminData();
+    setIsAddUserModalOpen(false);
+    setNewUsername('');
+    setNewEmail('');
+    setNewMobile('');
+    setNewBalanceLkr('100');
+    showAdminNotice(
+      `Created user "${createdProfile.username}" (VIP ${createdProfile.vipLevel}, Balance: ${formatCurrencyValue(
+        initialBal,
+        'LKR'
+      )} LKR, Referral Code: ${createdProfile.referralCode}). User can now log in from any device.`
+    );
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deletingUserBundle) return;
+    const targetUid = deletingUserBundle.uid;
+    const targetUsername = deletingUserBundle.profile.username;
+    setDeletingUserBundle(null);
+
+    await deleteUserFromCentralDatabaseAndLocal(targetUid, targetUsername);
+    if (onForceLogoutActiveUser) {
+      onForceLogoutActiveUser(targetUid);
+    }
+    loadAllAdminData();
+    showAdminNotice(
+      `Deleted user "${targetUsername}" (${targetUid}) from central database and unlocked their device.`
+    );
+  };
+
+  const handleQuickSaveAllMembersCount = () => {
+    const parsed = Math.max(0, Math.round(Number(quickAllMembersCount) || 0));
+    const saved = savePlatformSponsorGlobalStats({ totalMembersCount: parsed }, true);
+    setQuickAllMembersCount(String(saved.totalMembersCount));
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+    showAdminNotice(
+      `Updated All Members Count to ${saved.totalMembersCount.toLocaleString()} (displayed under Sponsor Countries).`
+    );
   };
 
   // ================= 1. ADMIN EDIT USER BALANCE =================
@@ -544,6 +735,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       vipTx,
       ...editingVipUser.transactions,
     ]);
+    distributeFiveLevelVipAndDepositCommissions(
+      updatedProfile,
+      0,
+      'Admin VIP Update',
+      false
+    );
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     pushUserNotification(editingVipUser.uid, {
       title: `VIP Tier Updated: ${tierObj.name} (VIP ${selectedNewVip})`,
       titleSi: `VIP මට්ටම යාවත්කාලීන කරන ලදී: ${tierObj.name} (VIP ${selectedNewVip})`,
@@ -733,6 +931,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const distributeReferralCommissionsOnDeposit = (
+    depositorProfile: UserProfile,
+    depositAmountLkr: number
+  ) => {
+    distributeFiveLevelVipAndDepositCommissions(
+      depositorProfile,
+      depositAmountLkr,
+      'Deposit Approval',
+      true
+    );
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+    loadAllAdminData();
+  };
+
+  const legacyDistributeUnused = (
     depositorProfile: UserProfile,
     depositAmountLkr: number
   ) => {
@@ -1851,6 +2063,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {/* Quick Edit All Members Count inline control */}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border ${
+                    isDark
+                      ? 'bg-[#0c1428] border-sky-500/35'
+                      : 'bg-sky-50 border-sky-200'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-400 whitespace-nowrap">
+                    All Members:
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={quickAllMembersCount}
+                    onChange={(e) => setQuickAllMembersCount(e.target.value)}
+                    className={`w-28 px-2 py-1 rounded-lg border text-xs font-mono font-extrabold ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-white border-slate-300 text-slate-900'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleQuickSaveAllMembersCount}
+                    className="px-2.5 py-1 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-[11px] font-extrabold flex items-center gap-1 cursor-pointer"
+                    title="Save All Members Count"
+                  >
+                    <Save className="w-3 h-3" />
+                    <span>Save</span>
+                  </button>
+                </div>
+
                 <select
                   value={vipFilter}
                   onChange={(e) => setVipFilter(e.target.value)}
@@ -1870,6 +2116,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     Upgrade Want Enabled ({upgradeRequiredUsersCount})
                   </option>
                 </select>
+
+                {/* Admin Add New User Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsAddUserModalOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 via-sky-500 to-blue-600 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-md"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>+ Add User</span>
+                </button>
               </div>
             </div>
 
@@ -2148,6 +2404,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           >
                             <LogOut className="w-3.5 h-3.5" />
                             <span>Logout User</span>
+                          </button>
+
+                          {/* 7. Admin Delete User Button */}
+                          <button
+                            type="button"
+                            onClick={() => setDeletingUserBundle(bundle)}
+                            className="px-3.5 py-2 rounded-xl bg-red-600/25 hover:bg-red-600/40 border border-red-500/50 text-red-200 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete User</span>
                           </button>
                         </div>
                       </div>
@@ -4951,6 +5217,314 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </div>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+       * MODAL 7: ADMIN ADD NEW USER MODAL
+       * ===================================================================== */}
+      {isAddUserModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 overflow-y-auto">
+          <div
+            className={`max-w-lg w-full my-auto rounded-3xl border p-6 space-y-4 shadow-2xl ${
+              isDark
+                ? 'bg-[#10182d] border-sky-500/40 text-white'
+                : 'bg-white border-sky-200 text-slate-900'
+            }`}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-sky-400" />
+                <div>
+                  <h3 className="text-base font-extrabold font-display">
+                    Add New Zentro User Account
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Saved directly to the central database — user can log in from any device.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddUserModalOpen(false)}
+                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateNewUserByAdmin} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Username *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newUsername}
+                    onChange={(e) => setNewUsername(e.target.value)}
+                    placeholder="e.g. kavindu_vip"
+                    className={`w-full px-3 py-2 rounded-xl border ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Email Address</label>
+                  <input
+                    type="email"
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    placeholder="user@zentro.io"
+                    className={`w-full px-3 py-2 rounded-xl border ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Dial Code</label>
+                  <input
+                    type="text"
+                    value={newCountryCode}
+                    onChange={(e) => setNewCountryCode(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block font-bold mb-1">Mobile Number *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newMobile}
+                    onChange={(e) => setNewMobile(e.target.value)}
+                    placeholder="771234567"
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Login Password *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Security PIN (6-Digit) *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newSecurityPin}
+                    onChange={(e) => setNewSecurityPin(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">VIP Tier</label>
+                  <select
+                    value={newVipLevel}
+                    onChange={(e) => setNewVipLevel(Number(e.target.value))}
+                    className={`w-full px-3 py-2 rounded-xl border font-bold ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  >
+                    <option value={0}>VIP 0 — Starter</option>
+                    <option value={1}>VIP 1 — Bronze</option>
+                    <option value={2}>VIP 2 — Silver</option>
+                    <option value={3}>VIP 3 — Gold</option>
+                    <option value={4}>VIP 4 — Platinum</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Initial Balance (LKR)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={newBalanceLkr}
+                    onChange={(e) => setNewBalanceLkr(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono font-extrabold ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">KYC Status</label>
+                  <select
+                    value={newKycStatus}
+                    onChange={(e) =>
+                      setNewKycStatus(e.target.value as 'unverified' | 'pending' | 'verified')
+                    }
+                    className={`w-full px-3 py-2 rounded-xl border font-bold ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  >
+                    <option value="verified">Verified ✓</option>
+                    <option value="pending">Pending</option>
+                    <option value="unverified">Unverified</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Country</label>
+                  <input
+                    type="text"
+                    value={newCountry}
+                    onChange={(e) => setNewCountry(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Currency</label>
+                  <select
+                    value={newCurrency}
+                    onChange={(e) => setNewCurrency(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono font-bold ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  >
+                    <option value="LKR">LKR</option>
+                    <option value="USDT">USDT</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">Invited By Code</label>
+                  <input
+                    type="text"
+                    value={newReferredBy}
+                    onChange={(e) => setNewReferredBy(e.target.value.toUpperCase())}
+                    placeholder="ZENTRO-VIP888"
+                    className={`w-full px-3 py-2 rounded-xl border font-mono uppercase ${
+                      isDark
+                        ? 'bg-[#16223d] border-white/15 text-white'
+                        : 'bg-slate-50 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setIsAddUserModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-white/15 text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 via-sky-500 to-blue-600 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-md"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>Create User Account</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+       * MODAL 8: ADMIN DELETE USER CONFIRMATION MODAL
+       * ===================================================================== */}
+      {deletingUserBundle && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div
+            className={`max-w-md w-full rounded-3xl border p-6 space-y-4 shadow-2xl ${
+              isDark
+                ? 'bg-[#141026] border-red-500/50 text-white'
+                : 'bg-white border-red-300 text-slate-900'
+            }`}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2 text-red-400">
+                <Trash2 className="w-5 h-5" />
+                <h3 className="text-base font-extrabold font-display">
+                  Delete User Account?
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingUserBundle(null)}
+                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <p>
+                Are you sure you want to permanently delete user{' '}
+                <strong className="text-pink-400">{deletingUserBundle.profile.username}</strong> (
+                <span className="font-mono">{deletingUserBundle.uid}</span>)?
+              </p>
+              <p className="text-slate-400">
+                This will remove their account, balance, transactions, KYC records, and unlock their registered device in the central database.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingUserBundle(null)}
+                className="px-4 py-2 rounded-xl border border-white/15 text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteUser}
+                className="px-5 py-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-md"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Confirm Delete User</span>
+              </button>
             </div>
           </div>
         </div>

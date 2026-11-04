@@ -270,30 +270,46 @@ export function getLkrPerUnitForCurrency(currency?: string): number {
 }
 
 export function convertFromLkr(amountInLkr: number, currency?: string): number {
+  const safeLkr = Number(amountInLkr) || 0;
+  if (safeLkr === 0) return 0;
   const code = (currency?.trim() || 'LKR').toUpperCase();
   const lkrPerUnit = getLkrPerUnitForCurrency(code);
   if (lkrPerUnit === 1) {
-    return Number(amountInLkr.toFixed(2));
+    return Math.round(safeLkr);
   }
-  const raw = amountInLkr / lkrPerUnit;
-  return Number(raw.toFixed(2));
+  const raw = safeLkr / lkrPerUnit;
+  if (safeLkr > 0) {
+    return Math.max(1, Math.round(raw));
+  }
+  return Math.round(raw);
 }
 
+const STANDARD_LKR_PACKAGE_AMOUNTS = [
+  1000, 1500, 2500, 3000, 5000, 6000, 8000, 10000, 14000, 15000, 18000, 24000, 25000, 38000, 48000,
+  50000,
+];
+
 export function convertToLkr(amountInCurrency: number, currency?: string): number {
+  const safeAmt = Number(amountInCurrency) || 0;
+  if (safeAmt === 0) return 0;
   const code = (currency?.trim() || 'LKR').toUpperCase();
   const lkrPerUnit = getLkrPerUnitForCurrency(code);
   if (lkrPerUnit === 1) {
-    return Number(amountInCurrency.toFixed(2));
+    return Math.round(safeAmt);
   }
-  return Number((amountInCurrency * lkrPerUnit).toFixed(2));
+  for (const pkgLkr of STANDARD_LKR_PACKAGE_AMOUNTS) {
+    if (Math.round(safeAmt) === convertFromLkr(pkgLkr, code)) {
+      return pkgLkr;
+    }
+  }
+  return Math.round(safeAmt * lkrPerUnit);
 }
 
 export function formatCurrencyValue(amountInLkr: number, currency?: string): string {
   const converted = convertFromLkr(amountInLkr, currency);
-  const isWhole = Math.abs(converted - Math.round(converted)) < 0.001;
-  return converted.toLocaleString(undefined, {
-    minimumFractionDigits: isWhole ? 0 : 2,
-    maximumFractionDigits: 2,
+  return Math.round(converted).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   });
 }
 
@@ -601,20 +617,25 @@ export function getExistingDeviceAccountLock(
       };
     }
 
-    // 2. Check local accounts database for any account already created on this device/MAC/IP
+    // 2. Check local accounts database ONLY for an account created on THIS specific device/MAC/IP
     const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
     if (rawAccounts) {
       const accounts: Record<string, { profile: UserProfile; password: string }> =
         JSON.parse(rawAccounts);
-      const allProfiles = Object.values(accounts).map((a) => a.profile);
+      const allProfiles = Object.values(accounts)
+        .map((a) => a?.profile)
+        .filter(Boolean);
       if (allProfiles.length > 0) {
-        const matched =
-          allProfiles.find(
-            (p) =>
-              (p.deviceId && p.deviceId === targetDeviceId) ||
-              (p.macAddress && p.macAddress === targetMac) ||
-              (targetIp && p.ipAddress && p.ipAddress === targetIp)
-          ) || allProfiles[0];
+        const matched = allProfiles.find(
+          (p) =>
+            (p.deviceId && p.deviceId === targetDeviceId) ||
+            (p.macAddress && p.macAddress === targetMac) ||
+            (targetIp &&
+              targetIp !== '127.0.0.1' &&
+              p.ipAddress &&
+              p.ipAddress !== '127.0.0.1' &&
+              p.ipAddress === targetIp)
+        );
 
         if (matched) {
           return {
@@ -663,6 +684,64 @@ export function bindDeviceAccountLock(record: DeviceAccountLockRecord): void {
   } catch {
     // ignore
   }
+}
+
+export function clearDeviceAccountLockForUser(uid: string, username?: string): void {
+  try {
+    const rawLocal = localStorage.getItem('zentro_device_account_lock_v1');
+    if (rawLocal) {
+      const parsed = JSON.parse(rawLocal);
+      if (
+        parsed?.uid === uid ||
+        (username &&
+          parsed?.username &&
+          String(parsed.username).toLowerCase() === username.toLowerCase())
+      ) {
+        localStorage.removeItem('zentro_device_account_lock_v1');
+      }
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const rawSession = sessionStorage.getItem('zentro_device_account_lock_v1');
+      if (rawSession) {
+        const parsed = JSON.parse(rawSession);
+        if (
+          parsed?.uid === uid ||
+          (username &&
+            parsed?.username &&
+            String(parsed.username).toLowerCase() === username.toLowerCase())
+        ) {
+          sessionStorage.removeItem('zentro_device_account_lock_v1');
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const cookieLock = readDeviceLockCookie();
+    if (
+      cookieLock &&
+      (cookieLock.uid === uid ||
+        (username &&
+          cookieLock.username &&
+          String(cookieLock.username).toLowerCase() === username.toLowerCase()))
+    ) {
+      if (typeof document !== 'undefined') {
+        document.cookie = 'zentro_device_lock_v1=; path=/; max-age=0; SameSite=Lax';
+      }
+    }
+  } catch {
+    // ignore
+  }
+  fetch('/api/security/delete-device', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid, username }),
+  }).catch(() => {});
 }
 
 export async function syncLocalDeviceLockToServer(
@@ -925,6 +1004,164 @@ export const VIP_TIER_IMAGES: Record<number, string> = {
   <text x="160" y="114" text-anchor="middle" fill="#38bdf8" font-family="sans-serif" font-weight="900" font-size="14.5" letter-spacing="1">12% DAILY</text>
   <rect x="66" y="156" width="188" height="28" rx="14" fill="#1e1b4b" stroke="#f472b6" stroke-width="1.8"/>
   <text x="160" y="174" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-weight="900" font-size="11.5" letter-spacing="1.5">ZENTRO PLATINUM · VIP 4</text>
+</svg>`),
+};
+
+export const PLATFORM_STATS_IMAGES = {
+  members:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <defs>
+    <linearGradient id="tmBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#071936"/>
+      <stop offset="52%" stop-color="#0f2c59"/>
+      <stop offset="100%" stop-color="#1e113a"/>
+    </linearGradient>
+    <radialGradient id="tmGlow" cx="50%" cy="44%" r="55%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.65"/>
+      <stop offset="55%" stop-color="#ec4899" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#071936" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tmCenterBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="tmLeftBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="tmRightBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f472b6"/>
+      <stop offset="100%" stop-color="#e11d48"/>
+    </linearGradient>
+    <linearGradient id="tmGoldCrown" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="34" fill="url(#tmBg)"/>
+  <rect x="3" y="3" width="154" height="154" rx="31" fill="none" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="2"/>
+  <circle cx="80" cy="72" r="68" fill="url(#tmGlow)"/>
+  <!-- Global Network Orbit & Latitude Lines -->
+  <circle cx="80" cy="68" r="48" fill="none" stroke="#38bdf8" stroke-opacity="0.28" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <ellipse cx="80" cy="68" rx="48" ry="20" fill="none" stroke="#f472b6" stroke-opacity="0.25" stroke-width="1.2"/>
+  <!-- Left Connected Member -->
+  <circle cx="42" cy="64" r="11" fill="url(#tmLeftBody)" stroke="#e0f2fe" stroke-width="1.5"/>
+  <path d="M22,102 C22,87 31,79 42,79 C53,79 62,87 62,102 Z" fill="url(#tmLeftBody)" opacity="0.92"/>
+  <!-- Right Connected Member -->
+  <circle cx="118" cy="64" r="11" fill="url(#tmRightBody)" stroke="#ffe4e6" stroke-width="1.5"/>
+  <path d="M98,102 C98,87 107,79 118,79 C129,79 138,87 138,102 Z" fill="url(#tmRightBody)" opacity="0.92"/>
+  <!-- Center VIP Leader Member -->
+  <path d="M66,34 L71,22 L80,30 L89,22 L94,34 Z" fill="url(#tmGoldCrown)" stroke="#fef9c3" stroke-width="1"/>
+  <circle cx="80" cy="54" r="16" fill="url(#tmCenterBody)" stroke="#ffffff" stroke-width="2.2"/>
+  <circle cx="75" cy="49" r="3.2" fill="#ffffff" fill-opacity="0.65"/>
+  <path d="M48,110 C48,88 62,75 80,75 C98,75 112,88 112,110 C112,114 109,116 105,116 L55,116 C51,116 48,114 48,110 Z" fill="url(#tmCenterBody)" stroke="#ffffff" stroke-width="1.8"/>
+  <!-- Live Active Pulse Dot -->
+  <circle cx="104" cy="40" r="6" fill="#10b981" stroke="#071936" stroke-width="2"/>
+  <!-- Bottom Ribbon Badge -->
+  <rect x="20" y="124" width="120" height="24" rx="12" fill="#09152b" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="80" y="140" text-anchor="middle" fill="#e0f2fe" font-family="sans-serif" font-weight="900" font-size="10.5" letter-spacing="1.2">VIP COMMUNITY</text>
+</svg>`),
+  invested:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <defs>
+    <linearGradient id="tiBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#260824"/>
+      <stop offset="50%" stop-color="#3b0a37"/>
+      <stop offset="100%" stop-color="#140c2e"/>
+    </linearGradient>
+    <radialGradient id="tiGlow" cx="50%" cy="45%" r="58%">
+      <stop offset="0%" stop-color="#ec4899" stop-opacity="0.65"/>
+      <stop offset="55%" stop-color="#f59e0b" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#260824" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tiBar1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="tiBar2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="tiBar3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f472b6"/>
+      <stop offset="100%" stop-color="#e11d48"/>
+    </linearGradient>
+    <linearGradient id="tiBar4" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="34" fill="url(#tiBg)"/>
+  <rect x="3" y="3" width="154" height="154" rx="31" fill="none" stroke="#f472b6" stroke-opacity="0.45" stroke-width="2"/>
+  <circle cx="80" cy="72" r="68" fill="url(#tiGlow)"/>
+  <!-- Rising 3D Investment Bars -->
+  <rect x="26" y="82" width="18" height="32" rx="5" fill="url(#tiBar1)" stroke="#bae6fd" stroke-width="1"/>
+  <rect x="52" y="68" width="18" height="46" rx="5" fill="url(#tiBar2)" stroke="#e9d5ff" stroke-width="1"/>
+  <rect x="78" y="52" width="18" height="62" rx="5" fill="url(#tiBar3)" stroke="#fecdd3" stroke-width="1"/>
+  <rect x="104" y="34" width="20" height="80" rx="5" fill="url(#tiBar4)" stroke="#fef9c3" stroke-width="1.5"/>
+  <!-- Dynamic Upward Growth Trajectory Arrow -->
+  <path d="M26,70 Q64,56 112,22" fill="none" stroke="#fef08a" stroke-width="4" stroke-linecap="round"/>
+  <polygon points="122,16 105,18 115,31" fill="#fef08a"/>
+  <!-- Golden Capital Coin Badge in Foreground -->
+  <circle cx="48" cy="42" r="16" fill="url(#tiBar4)" stroke="#ffffff" stroke-width="2"/>
+  <text x="48" y="48" text-anchor="middle" fill="#451a03" font-family="sans-serif" font-weight="900" font-size="16">$</text>
+  <!-- Bottom Ribbon Badge -->
+  <rect x="20" y="124" width="120" height="24" rx="12" fill="#1f0721" stroke="#f472b6" stroke-width="1.5"/>
+  <text x="80" y="140" text-anchor="middle" fill="#fce7f3" font-family="sans-serif" font-weight="900" font-size="10.5" letter-spacing="1.2">CAPITAL POOL</text>
+</svg>`),
+  payout:
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <defs>
+    <linearGradient id="tpBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#04241d"/>
+      <stop offset="50%" stop-color="#06392e"/>
+      <stop offset="100%" stop-color="#071930"/>
+    </linearGradient>
+    <radialGradient id="tpGlow" cx="50%" cy="45%" r="58%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.65"/>
+      <stop offset="55%" stop-color="#fbbf24" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#04241d" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tpNote" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="55%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="tpGoldCoin" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="34" fill="url(#tpBg)"/>
+  <rect x="3" y="3" width="154" height="154" rx="31" fill="none" stroke="#34d399" stroke-opacity="0.45" stroke-width="2"/>
+  <circle cx="80" cy="72" r="68" fill="url(#tpGlow)"/>
+  <!-- Tilted Cash Banknote Stack Behind -->
+  <g transform="rotate(-10 76 62)">
+    <rect x="28" y="38" width="88" height="48" rx="9" fill="#059669" stroke="#a7f3d0" stroke-width="1.5"/>
+  </g>
+  <!-- Main Crisp Payout Banknote / Digital Treasury Card -->
+  <rect x="26" y="44" width="92" height="52" rx="10" fill="url(#tpNote)" stroke="#ecfdf5" stroke-width="2"/>
+  <circle cx="72" cy="70" r="14" fill="#064e3b" fill-opacity="0.45" stroke="#a7f3d0" stroke-width="1.5"/>
+  <text x="72" y="76" text-anchor="middle" fill="#fef08a" font-family="sans-serif" font-weight="900" font-size="16">₮</text>
+  <!-- Floating Gold Payout Coin + Verified Check Shield -->
+  <circle cx="118" cy="86" r="20" fill="url(#tpGoldCoin)" stroke="#ffffff" stroke-width="2.2"/>
+  <path d="M110,86 L116,92 L127,79" fill="none" stroke="#451a03" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Sparkles -->
+  <circle cx="38" cy="28" r="3" fill="#fef08a"/>
+  <circle cx="126" cy="34" r="3.5" fill="#6ee7b7"/>
+  <!-- Bottom Ribbon Badge -->
+  <rect x="20" y="124" width="120" height="24" rx="12" fill="#031c16" stroke="#34d399" stroke-width="1.5"/>
+  <text x="80" y="140" text-anchor="middle" fill="#d1fae5" font-family="sans-serif" font-weight="900" font-size="10.5" letter-spacing="1.2">INSTANT PAYOUT</text>
 </svg>`),
 };
 
@@ -1958,18 +2195,174 @@ export function resetPlatformTasksCatalogToDefault(): ZentroPlatformTask[] {
   return [...PLATFORM_DAILY_TASKS];
 }
 
+export interface PlatformSponsorGlobalStats {
+  totalMembersCount: number;
+  totalInvestingLkr: number;
+  totalPayoutLkr: number;
+  updatedAt?: string;
+}
+
+const ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY = 'zentro_admin_sponsor_global_stats_v1';
+
+export const DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS: PlatformSponsorGlobalStats = {
+  totalMembersCount: DEFAULT_SPONSOR_COUNTRIES.reduce(
+    (sum, c) => sum + (Number(c.registeredUsers) || 0),
+    0
+  ),
+  totalInvestingLkr: 485920000,
+  totalPayoutLkr: 194368000,
+};
+
 export function getSponsorCountriesCatalog(): SponsorCountryItem[] {
   return [...SPONSOR_COUNTRIES];
+}
+
+export function getPlatformSponsorGlobalStats(): PlatformSponsorGlobalStats {
+  const countriesSum = SPONSOR_COUNTRIES.reduce(
+    (sum, c) => sum + (Number(c.registeredUsers) || 0),
+    0
+  );
+  if (typeof window === 'undefined') {
+    return {
+      ...DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS,
+      totalMembersCount: countriesSum || DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS.totalMembersCount,
+    };
+  }
+  try {
+    const raw = window.localStorage.getItem(ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PlatformSponsorGlobalStats>;
+      return {
+        totalMembersCount:
+          typeof parsed.totalMembersCount === 'number' && parsed.totalMembersCount >= 0
+            ? Math.round(parsed.totalMembersCount)
+            : countriesSum,
+        totalInvestingLkr:
+          typeof parsed.totalInvestingLkr === 'number' && parsed.totalInvestingLkr >= 0
+            ? Number(parsed.totalInvestingLkr)
+            : DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS.totalInvestingLkr,
+        totalPayoutLkr:
+          typeof parsed.totalPayoutLkr === 'number' && parsed.totalPayoutLkr >= 0
+            ? Number(parsed.totalPayoutLkr)
+            : DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS.totalPayoutLkr,
+        updatedAt: parsed.updatedAt,
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return {
+    ...DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS,
+    totalMembersCount: countriesSum,
+  };
+}
+
+export function savePlatformSponsorGlobalStats(
+  nextStats: Partial<PlatformSponsorGlobalStats>,
+  distributeMembersAcrossCountries = false
+): PlatformSponsorGlobalStats {
+  const current = getPlatformSponsorGlobalStats();
+  const updated: PlatformSponsorGlobalStats = {
+    totalMembersCount:
+      typeof nextStats.totalMembersCount === 'number' && nextStats.totalMembersCount >= 0
+        ? Math.round(nextStats.totalMembersCount)
+        : current.totalMembersCount,
+    totalInvestingLkr:
+      typeof nextStats.totalInvestingLkr === 'number' && nextStats.totalInvestingLkr >= 0
+        ? Number(nextStats.totalInvestingLkr)
+        : current.totalInvestingLkr,
+    totalPayoutLkr:
+      typeof nextStats.totalPayoutLkr === 'number' && nextStats.totalPayoutLkr >= 0
+        ? Number(nextStats.totalPayoutLkr)
+        : current.totalPayoutLkr,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (distributeMembersAcrossCountries && SPONSOR_COUNTRIES.length > 0) {
+    const currentSum = SPONSOR_COUNTRIES.reduce(
+      (sum, c) => sum + (Number(c.registeredUsers) || 0),
+      0
+    );
+    const targetTotal = updated.totalMembersCount;
+    let remaining = targetTotal;
+    const adjustedCountries = SPONSOR_COUNTRIES.map((c, idx) => {
+      if (idx === SPONSOR_COUNTRIES.length - 1) {
+        return {
+          ...c,
+          registeredUsers: Math.max(0, remaining),
+        };
+      }
+      const share =
+        currentSum > 0
+          ? Math.round(((Number(c.registeredUsers) || 0) / currentSum) * targetTotal)
+          : Math.round(targetTotal / SPONSOR_COUNTRIES.length);
+      remaining -= share;
+      return {
+        ...c,
+        registeredUsers: Math.max(0, share),
+      };
+    });
+    SPONSOR_COUNTRIES.splice(0, SPONSOR_COUNTRIES.length, ...adjustedCountries);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(
+        ADMIN_SPONSOR_COUNTRIES_STORAGE_KEY,
+        JSON.stringify(adjustedCountries)
+      );
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(
+      ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY,
+      JSON.stringify(updated)
+    );
+  }
+  dispatchCatalogUpdated();
+  return updated;
+}
+
+export function resetPlatformSponsorGlobalStatsToDefault(): PlatformSponsorGlobalStats {
+  const countriesSum = DEFAULT_SPONSOR_COUNTRIES.reduce(
+    (sum, c) => sum + (Number(c.registeredUsers) || 0),
+    0
+  );
+  const fresh: PlatformSponsorGlobalStats = {
+    totalMembersCount: countriesSum,
+    totalInvestingLkr: DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS.totalInvestingLkr,
+    totalPayoutLkr: DEFAULT_PLATFORM_SPONSOR_GLOBAL_STATS.totalPayoutLkr,
+    updatedAt: new Date().toISOString(),
+  };
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(
+      ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY,
+      JSON.stringify(fresh)
+    );
+  }
+  dispatchCatalogUpdated();
+  return fresh;
 }
 
 export function saveSponsorCountriesCatalog(
   nextCountries: SponsorCountryItem[]
 ): SponsorCountryItem[] {
   SPONSOR_COUNTRIES.splice(0, SPONSOR_COUNTRIES.length, ...nextCountries);
+  const nextSum = nextCountries.reduce(
+    (sum, c) => sum + (Number(c.registeredUsers) || 0),
+    0
+  );
   if (typeof window !== 'undefined') {
     window.localStorage.setItem(
       ADMIN_SPONSOR_COUNTRIES_STORAGE_KEY,
       JSON.stringify(nextCountries)
+    );
+    const currentStats = getPlatformSponsorGlobalStats();
+    window.localStorage.setItem(
+      ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY,
+      JSON.stringify({
+        ...currentStats,
+        totalMembersCount: nextSum,
+        updatedAt: new Date().toISOString(),
+      })
     );
   }
   dispatchCatalogUpdated();
@@ -1981,6 +2374,7 @@ export function resetSponsorCountriesCatalogToDefault(): SponsorCountryItem[] {
   SPONSOR_COUNTRIES.splice(0, SPONSOR_COUNTRIES.length, ...fresh);
   if (typeof window !== 'undefined') {
     window.localStorage.removeItem(ADMIN_SPONSOR_COUNTRIES_STORAGE_KEY);
+    resetPlatformSponsorGlobalStatsToDefault();
   }
   dispatchCatalogUpdated();
   return [...SPONSOR_COUNTRIES];
@@ -4115,5 +4509,750 @@ export function getAllKnownLiveChatUsers(
   }
 
   return Array.from(map.values());
+}
+
+// ============================================================================
+// CENTRAL DATABASE SYNCHRONIZATION & 5-LEVEL REFERRAL TRACKING SYSTEM
+// ============================================================================
+
+const DELETED_UIDS_STORAGE_KEY = 'zentro_deleted_uids_v1';
+
+export function getLocalDeletedUids(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(DELETED_UIDS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function addLocalDeletedUid(uid: string): string[] {
+  if (typeof window === 'undefined' || !uid) return [];
+  try {
+    const existing = new Set(getLocalDeletedUids());
+    existing.add(uid);
+    const arr = Array.from(existing);
+    localStorage.setItem(DELETED_UIDS_STORAGE_KEY, JSON.stringify(arr));
+    return arr;
+  } catch {
+    return [uid];
+  }
+}
+
+function mergeArrayByIdLocal<T extends { id?: string; createdAt?: any; updatedAt?: any }>(
+  existing: T[] = [],
+  incoming: T[] = []
+): T[] {
+  const map = new Map<string, T>();
+  for (const item of existing) {
+    if (item && item.id) {
+      map.set(String(item.id), item);
+    }
+  }
+  for (const item of incoming) {
+    if (item && item.id) {
+      const prev = map.get(String(item.id));
+      map.set(String(item.id), prev ? { ...prev, ...item } : item);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    const tA = new Date(a.createdAt || a.updatedAt || 0).getTime();
+    const tB = new Date(b.createdAt || b.updatedAt || 0).getTime();
+    return tB - tA;
+  });
+}
+
+// Reconcile 5-level referral downlines (L1 to L5) in local storage across all registered accounts
+export function reconcileFiveLevelReferralTreesLocal(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    if (!rawAccounts) return;
+    const accounts: Record<string, { profile: UserProfile; password: string }> =
+      JSON.parse(rawAccounts);
+    const deletedSet = new Set(getLocalDeletedUids());
+
+    const validEntries = Object.values(accounts).filter(
+      (entry) => entry && entry.profile && entry.profile.uid && !deletedSet.has(entry.profile.uid)
+    );
+
+    const byRefCode = new Map<string, { profile: UserProfile; password: string }>();
+    for (const entry of validEntries) {
+      const code = String(entry.profile.referralCode || '')
+        .trim()
+        .toUpperCase();
+      if (code) {
+        byRefCode.set(code, entry);
+      }
+    }
+
+    for (const memberEntry of validEntries) {
+      const member = memberEntry.profile;
+      let currentCode = String(member.referredBy || '')
+        .trim()
+        .toUpperCase();
+      const visitedUids = new Set<string>([member.uid]);
+
+      for (let level = 1; level <= 5; level++) {
+        if (!currentCode) break;
+        const uplineEntry = byRefCode.get(currentCode);
+        if (!uplineEntry || !uplineEntry.profile) break;
+        const upline = uplineEntry.profile;
+        if (visitedUids.has(upline.uid)) break;
+        visitedUids.add(upline.uid);
+
+        const refsKey = `zentro_refs_${upline.uid}`;
+        const rawRefs = localStorage.getItem(refsKey);
+        const uplineRefs: ReferralRecordData[] = rawRefs ? JSON.parse(rawRefs) : [];
+
+        // Find any existing record for this downline member at this tierLevel
+        const existingIndexes: number[] = [];
+        uplineRefs.forEach((r, idx) => {
+          if (
+            r &&
+            String(r.referredUsername || '').toLowerCase() ===
+              String(member.username || '').toLowerCase() &&
+            Number(r.tierLevel) === level
+          ) {
+            existingIndexes.push(idx);
+          }
+        });
+
+        if (existingIndexes.length > 0) {
+          // Ensure all records for this member reflect their latest VIP level
+          let changed = false;
+          for (const idx of existingIndexes) {
+            if (Number(member.vipLevel || 0) > Number(uplineRefs[idx].vipLevel || 0)) {
+              uplineRefs[idx] = {
+                ...uplineRefs[idx],
+                vipLevel: Number(member.vipLevel || 0),
+              };
+              changed = true;
+            }
+          }
+          if (changed) {
+            localStorage.setItem(refsKey, JSON.stringify(uplineRefs));
+          }
+        } else {
+          // Create the registration/downline tracking entry for this level (L1-L5)
+          const treeEntry: ReferralRecordData = {
+            id: `ref_tree_${upline.uid}_${member.uid}_L${level}`,
+            referrerUid: upline.uid,
+            referredUsername: member.username,
+            referralCodeUsed: upline.referralCode,
+            tierLevel: level,
+            vipLevel: Number(member.vipLevel || 0),
+            commissionEarned: 0,
+            createdAt: String(member.createdAt || new Date().toISOString()),
+          };
+          uplineRefs.unshift(treeEntry);
+          localStorage.setItem(refsKey, JSON.stringify(uplineRefs));
+        }
+
+        currentCode = String(upline.referredBy || '')
+          .trim()
+          .toUpperCase();
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// Record L1-L5 downlines upon registration & credit L1 Friend Registration Bonus
+export function recordFiveLevelReferralOnRegistration(newProfile: UserProfile): {
+  l1ReferrerProfile: UserProfile | null;
+  l1BonusLkr: number;
+} {
+  if (typeof window === 'undefined') {
+    return { l1ReferrerProfile: null, l1BonusLkr: 0 };
+  }
+  try {
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    if (!rawAccounts) return { l1ReferrerProfile: null, l1BonusLkr: 0 };
+    const accounts: Record<string, { profile: UserProfile; password: string }> =
+      JSON.parse(rawAccounts);
+
+    let currentCode = String(newProfile.referredBy || '')
+      .trim()
+      .toUpperCase();
+    const visitedUids = new Set<string>([newProfile.uid]);
+    let l1ReferrerProfile: UserProfile | null = null;
+    let l1BonusLkr = 0;
+
+    for (let tierLevel = 1; tierLevel <= 5; tierLevel++) {
+      if (!currentCode) break;
+      const uplineEntry = Object.values(accounts).find(
+        (acc) =>
+          acc?.profile &&
+          String(acc.profile.referralCode || '')
+            .trim()
+            .toUpperCase() === currentCode &&
+          !visitedUids.has(acc.profile.uid)
+      );
+      if (!uplineEntry || !uplineEntry.profile) break;
+
+      const upline = uplineEntry.profile;
+      visitedUids.add(upline.uid);
+
+      const refsKey = `zentro_refs_${upline.uid}`;
+      const rawRefs = localStorage.getItem(refsKey);
+      const uplineRefs: ReferralRecordData[] = rawRefs ? JSON.parse(rawRefs) : [];
+
+      let bonusForThisLevel = 0;
+      if (tierLevel === 1 && upline.vipLevel >= 1) {
+        bonusForThisLevel = getFriendRegistrationBonusForVip(upline.vipLevel);
+        l1BonusLkr = bonusForThisLevel;
+
+        const updatedUpline: UserProfile = {
+          ...upline,
+          balance: Number((upline.balance + bonusForThisLevel).toFixed(2)),
+          totalEarnings: Number((upline.totalEarnings + bonusForThisLevel).toFixed(2)),
+          updatedAt: new Date().toISOString(),
+        };
+        accounts[upline.uid] = {
+          profile: updatedUpline,
+          password: uplineEntry.password,
+        };
+        l1ReferrerProfile = updatedUpline;
+
+        const txKey = `zentro_tx_${upline.uid}`;
+        const rawTx = localStorage.getItem(txKey);
+        const uplineTx: TransactionRecord[] = rawTx ? JSON.parse(rawTx) : [];
+        uplineTx.unshift({
+          id: `tx_reg_bonus_${newProfile.uid}_L1`,
+          userId: upline.uid,
+          type: 'referral_bonus',
+          amount: bonusForThisLevel,
+          status: 'completed',
+          description: `L1 Friend Registration Bonus (+${bonusForThisLevel} LKR — ${newProfile.username})`,
+          createdAt: new Date().toISOString(),
+        });
+        localStorage.setItem(txKey, JSON.stringify(uplineTx));
+
+        pushUserNotification(upline.uid, {
+          title: `New L1 Friend Registered: +${bonusForThisLevel} LKR Bonus!`,
+          titleSi: `නව L1 මිතුරෙකු ලියාපදිංචි විය: +${bonusForThisLevel} LKR ප්‍රසාද දීමනාව!`,
+          message: `${newProfile.username} registered using your referral code (${upline.referralCode}). +${bonusForThisLevel} LKR has been credited to your wallet.`,
+          messageSi: `${newProfile.username} ඔබගේ යොමු කේතය (${upline.referralCode}) භාවිතා කර ලියාපදිංචි විය. +${bonusForThisLevel} LKR ඔබගේ ගිණුමට එක් කරන ලදී.`,
+          category: 'referral',
+          priority: 'high',
+          actionTab: 'team',
+          actionLabel: 'View Team',
+          actionLabelSi: 'කණ්ඩායම බලන්න',
+        });
+      } else if (tierLevel > 1) {
+        pushUserNotification(upline.uid, {
+          title: `New Level ${tierLevel} Team Member Joined: ${newProfile.username}`,
+          titleSi: `නව මට්ටම ${tierLevel} (L${tierLevel}) සාමාජිකයෙකු එක් විය: ${newProfile.username}`,
+          message: `${newProfile.username} joined your Level ${tierLevel} referral network. You will earn L${tierLevel} commissions when they activate VIP or deposit!`,
+          messageSi: `${newProfile.username} ඔබගේ L${tierLevel} කණ්ඩායමට එක් විය. ඔවුන් VIP සක්‍රිය කරන විට හෝ තැන්පත් කරන විට ඔබට L${tierLevel} කොමිස් හිමිවේ!`,
+          category: 'referral',
+          priority: 'normal',
+          actionTab: 'team',
+          actionLabel: 'Open Team Tree',
+          actionLabelSi: 'කණ්ඩායම බලන්න',
+        });
+      }
+
+      const refEntryId = `ref_tree_${upline.uid}_${newProfile.uid}_L${tierLevel}`;
+      const filteredRefs = uplineRefs.filter((r) => r.id !== refEntryId);
+      filteredRefs.unshift({
+        id: refEntryId,
+        referrerUid: upline.uid,
+        referredUsername: newProfile.username,
+        referralCodeUsed: upline.referralCode,
+        tierLevel,
+        vipLevel: newProfile.vipLevel || 0,
+        commissionEarned: bonusForThisLevel,
+        createdAt: new Date().toISOString(),
+      });
+      localStorage.setItem(refsKey, JSON.stringify(filteredRefs));
+
+      currentCode = String(upline.referredBy || '')
+        .trim()
+        .toUpperCase();
+    }
+
+    localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+    return { l1ReferrerProfile, l1BonusLkr };
+  } catch {
+    return { l1ReferrerProfile: null, l1BonusLkr: 0 };
+  }
+}
+
+// Distribute 5-Level (L1-L5) commissions and update downline VIP level across all 5 uplines
+export function distributeFiveLevelVipAndDepositCommissions(
+  memberProfile: UserProfile,
+  amountLkr: number,
+  sourceLabel = 'Deposit / VIP Activation',
+  payCommissions = true
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    if (!rawAccounts) return;
+    const accounts: Record<string, { profile: UserProfile; password: string }> =
+      JSON.parse(rawAccounts);
+
+    let currentReferredByCode = String(memberProfile.referredBy || '')
+      .trim()
+      .toUpperCase();
+    const visitedUids = new Set<string>([memberProfile.uid]);
+
+    for (let tierLevel = 1; tierLevel <= 5; tierLevel++) {
+      if (!currentReferredByCode) break;
+      const uplineEntry = Object.values(accounts).find(
+        (acc) =>
+          acc?.profile &&
+          String(acc.profile.referralCode || '')
+            .trim()
+            .toUpperCase() === currentReferredByCode &&
+          !visitedUids.has(acc.profile.uid)
+      );
+      if (!uplineEntry || !uplineEntry.profile) break;
+
+      const uplineProfile = uplineEntry.profile;
+      visitedUids.add(uplineProfile.uid);
+
+      const refsKey = `zentro_refs_${uplineProfile.uid}`;
+      const rawUplineRefs = localStorage.getItem(refsKey);
+      const uplineRefsList: ReferralRecordData[] = rawUplineRefs
+        ? JSON.parse(rawUplineRefs)
+        : [];
+
+      // Always update any existing referral record for this member to reflect their new VIP level
+      let foundMemberInRefs = false;
+      const updatedUplineRefs = uplineRefsList.map((r) => {
+        if (
+          r &&
+          String(r.referredUsername || '').toLowerCase() ===
+            String(memberProfile.username || '').toLowerCase() &&
+          Number(r.tierLevel) === tierLevel
+        ) {
+          foundMemberInRefs = true;
+          return {
+            ...r,
+            vipLevel: Math.max(Number(r.vipLevel || 0), Number(memberProfile.vipLevel || 0)),
+          };
+        }
+        return r;
+      });
+
+      let commissionLkr = 0;
+      let ratePercent = 0;
+
+      if (payCommissions && amountLkr > 0 && uplineProfile.vipLevel >= 1) {
+        const commLevels = getCommissionLevelsForVip(uplineProfile.vipLevel);
+        const rateObj = commLevels.find((l) => l.level === tierLevel);
+        if (rateObj && rateObj.rate > 0) {
+          ratePercent = rateObj.ratePercent;
+          commissionLkr = Number((amountLkr * rateObj.rate).toFixed(2));
+        }
+      }
+
+      if (commissionLkr > 0) {
+        const nextUplineBal = Number((uplineProfile.balance + commissionLkr).toFixed(2));
+        const nextUplineEarn = Number(
+          (uplineProfile.totalEarnings + commissionLkr).toFixed(2)
+        );
+        const updatedUpline: UserProfile = {
+          ...uplineProfile,
+          balance: nextUplineBal,
+          totalEarnings: nextUplineEarn,
+          updatedAt: new Date().toISOString(),
+        };
+        accounts[uplineProfile.uid] = {
+          profile: updatedUpline,
+          password: uplineEntry.password,
+        };
+
+        const txKey = `zentro_tx_${uplineProfile.uid}`;
+        const rawUplineTx = localStorage.getItem(txKey);
+        const uplineTxList: TransactionRecord[] = rawUplineTx
+          ? JSON.parse(rawUplineTx)
+          : [];
+        uplineTxList.unshift({
+          id: `tx_ref_comm_${Date.now()}_${memberProfile.uid}_L${tierLevel}`,
+          userId: uplineProfile.uid,
+          type: 'referral_bonus',
+          amount: commissionLkr,
+          status: 'completed',
+          description: `L${tierLevel} (${ratePercent}%) ${sourceLabel} Bonus from ${memberProfile.username}`,
+          createdAt: new Date().toISOString(),
+        });
+        localStorage.setItem(txKey, JSON.stringify(uplineTxList));
+
+        updatedUplineRefs.unshift({
+          id: `ref_comm_${Date.now()}_${memberProfile.uid}_L${tierLevel}`,
+          referrerUid: uplineProfile.uid,
+          referredUsername: memberProfile.username,
+          referralCodeUsed: uplineProfile.referralCode,
+          tierLevel,
+          vipLevel: memberProfile.vipLevel,
+          commissionEarned: commissionLkr,
+          createdAt: new Date().toISOString(),
+        });
+
+        pushUserNotification(uplineProfile.uid, {
+          title: `Level ${tierLevel} Commission Earned: +${commissionLkr} LKR`,
+          titleSi: `මට්ටම ${tierLevel} කොමිස් මුදලක් ලැබුණි: +${commissionLkr} LKR`,
+          message: `You earned a ${ratePercent}% Level ${tierLevel} commission (+${commissionLkr} LKR) from ${memberProfile.username} (${sourceLabel}).`,
+          messageSi: `ඔබගේ කණ්ඩායම් සාමාජික ${memberProfile.username} ගෙන් ${ratePercent}% (මට්ටම ${tierLevel}) කොමිස් මුදලක් (+${commissionLkr} LKR) ඔබගේ ගිණුමට එක් විය.`,
+          category: 'referral',
+          priority: 'high',
+          actionTab: 'team',
+          actionLabel: 'View Team Earnings',
+          actionLabelSi: 'කණ්ඩායම් ආදායම බලන්න',
+        });
+      } else if (!foundMemberInRefs) {
+        updatedUplineRefs.unshift({
+          id: `ref_tree_${uplineProfile.uid}_${memberProfile.uid}_L${tierLevel}`,
+          referrerUid: uplineProfile.uid,
+          referredUsername: memberProfile.username,
+          referralCodeUsed: uplineProfile.referralCode,
+          tierLevel,
+          vipLevel: memberProfile.vipLevel,
+          commissionEarned: 0,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      localStorage.setItem(refsKey, JSON.stringify(updatedUplineRefs));
+      currentReferredByCode = String(uplineProfile.referredBy || '')
+        .trim()
+        .toUpperCase();
+    }
+
+    localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+  } catch (e) {
+    console.error('Error in distributeFiveLevelVipAndDepositCommissions:', e);
+  }
+}
+
+let isSyncingCentralDb = false;
+
+export async function syncCentralDatabaseWithServer(options?: {
+  forceOverwrite?: boolean;
+  deletedUids?: string[];
+}): Promise<void> {
+  if (typeof window === 'undefined' || isSyncingCentralDb) return;
+  isSyncingCentralDb = true;
+  try {
+    reconcileFiveLevelReferralTreesLocal();
+
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    const localAccounts: Record<string, { profile: UserProfile; password: string }> =
+      rawAccounts ? JSON.parse(rawAccounts) : {};
+    const deletedUids = Array.from(
+      new Set([...getLocalDeletedUids(), ...(options?.deletedUids || [])])
+    );
+    const deletedSet = new Set(deletedUids);
+
+    const transactionsMap: Record<string, TransactionRecord[]> = {};
+    const bankAccountsMap: Record<string, BankAccountRecord[]> = {};
+    const kycRecordsMap: Record<string, KycRecordData> = {};
+    const referralsMap: Record<string, ReferralRecordData[]> = {};
+    const depositRequestsMap: Record<string, DepositRequestRecord[]> = {};
+    const withdrawalRequestsMap: Record<string, WithdrawalRequestRecord[]> = {};
+    const notificationsMap: Record<string, AppNotification[]> = {};
+
+    for (const uid of Object.keys(localAccounts)) {
+      if (deletedSet.has(uid)) {
+        delete localAccounts[uid];
+        continue;
+      }
+      const rawTx = localStorage.getItem(`zentro_tx_${uid}`);
+      if (rawTx) transactionsMap[uid] = JSON.parse(rawTx);
+
+      const rawBanks = localStorage.getItem(`zentro_banks_${uid}`);
+      if (rawBanks) bankAccountsMap[uid] = JSON.parse(rawBanks);
+
+      const kyc = getLocalKycRequestByUser(uid);
+      if (kyc) kycRecordsMap[uid] = kyc;
+
+      const rawRefs = localStorage.getItem(`zentro_refs_${uid}`);
+      if (rawRefs) referralsMap[uid] = JSON.parse(rawRefs);
+
+      const depReqs = getLocalDepositRequests(uid);
+      if (depReqs.length > 0) depositRequestsMap[uid] = depReqs;
+
+      const wdrReqs = getLocalWithdrawalRequests(uid);
+      if (wdrReqs.length > 0) withdrawalRequestsMap[uid] = wdrReqs;
+
+      const rawNotifs = localStorage.getItem(`${USER_NOTIFICATIONS_PREFIX}${uid}`);
+      if (rawNotifs) notificationsMap[uid] = JSON.parse(rawNotifs);
+    }
+
+    const res = await fetch('/api/db/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        forceOverwrite: Boolean(options?.forceOverwrite),
+        deletedUids,
+        accounts: localAccounts,
+        transactions: transactionsMap,
+        bankAccounts: bankAccountsMap,
+        kycRecords: kycRecordsMap,
+        referrals: referralsMap,
+        depositRequests: depositRequestsMap,
+        withdrawalRequests: withdrawalRequestsMap,
+        notifications: notificationsMap,
+        globalBroadcasts: getGlobalBroadcastNotifications(),
+        catalogs: {
+          sponsorCountries: getSponsorCountriesCatalog(),
+          sponsorGlobalStats: getPlatformSponsorGlobalStats(),
+        },
+      }),
+    });
+
+    if (!res.ok) return;
+    const data = await res.json();
+    const serverDb = data?.db;
+    if (!serverDb) return;
+
+    const serverDeletedUids: string[] = Array.isArray(serverDb.deletedUids)
+      ? serverDb.deletedUids
+      : [];
+    const allDeleted = new Set([...deletedUids, ...serverDeletedUids]);
+    localStorage.setItem(DELETED_UIDS_STORAGE_KEY, JSON.stringify(Array.from(allDeleted)));
+
+    // Remove deleted accounts locally
+    for (const delUid of allDeleted) {
+      delete localAccounts[delUid];
+      localStorage.removeItem(`zentro_tx_${delUid}`);
+      localStorage.removeItem(`zentro_banks_${delUid}`);
+      localStorage.removeItem(`zentro_kyc_${delUid}`);
+      localStorage.removeItem(`zentro_refs_${delUid}`);
+      localStorage.removeItem(`${DEPOSIT_REQUESTS_STORAGE_PREFIX}${delUid}`);
+      localStorage.removeItem(`${WITHDRAWAL_REQUESTS_STORAGE_PREFIX}${delUid}`);
+      localStorage.removeItem(`${USER_NOTIFICATIONS_PREFIX}${delUid}`);
+    }
+
+    // Merge server accounts into local storage
+    if (serverDb.accounts && typeof serverDb.accounts === 'object') {
+      for (const [uid, srvAcc] of Object.entries<any>(serverDb.accounts)) {
+        if (!uid || allDeleted.has(uid) || !srvAcc?.profile) continue;
+        const locAcc = localAccounts[uid];
+        if (!locAcc) {
+          localAccounts[uid] = srvAcc;
+        } else {
+          const locTime = new Date(
+            locAcc.profile?.updatedAt || locAcc.profile?.createdAt || 0
+          ).getTime();
+          const srvTime = new Date(
+            srvAcc.profile?.updatedAt || srvAcc.profile?.createdAt || 0
+          ).getTime();
+          if (srvTime >= locTime) {
+            localAccounts[uid] = {
+              profile: { ...locAcc.profile, ...srvAcc.profile },
+              password: srvAcc.password || locAcc.password || 'zentro123',
+            };
+          }
+        }
+      }
+      localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(localAccounts));
+    }
+
+    // Merge per-user collections from serverDb into local storage
+    const syncLocalCollection = (
+      serverMap: Record<string, any[]> | undefined,
+      prefix: string
+    ) => {
+      if (!serverMap || typeof serverMap !== 'object') return;
+      for (const [uid, srvList] of Object.entries(serverMap)) {
+        if (!uid || allDeleted.has(uid) || !Array.isArray(srvList)) continue;
+        const key = `${prefix}${uid}`;
+        const rawLoc = localStorage.getItem(key);
+        const locList = rawLoc ? JSON.parse(rawLoc) : [];
+        const merged = mergeArrayByIdLocal(locList, srvList);
+        localStorage.setItem(key, JSON.stringify(merged));
+      }
+    };
+
+    syncLocalCollection(serverDb.transactions, 'zentro_tx_');
+    syncLocalCollection(serverDb.bankAccounts, 'zentro_banks_');
+    syncLocalCollection(serverDb.referrals, 'zentro_refs_');
+    syncLocalCollection(serverDb.depositRequests, DEPOSIT_REQUESTS_STORAGE_PREFIX);
+    syncLocalCollection(serverDb.withdrawalRequests, WITHDRAWAL_REQUESTS_STORAGE_PREFIX);
+    syncLocalCollection(serverDb.notifications, USER_NOTIFICATIONS_PREFIX);
+
+    if (serverDb.kycRecords && typeof serverDb.kycRecords === 'object') {
+      const allKyc: KycRecordData[] = [];
+      for (const [uid, kyc] of Object.entries<any>(serverDb.kycRecords)) {
+        if (!uid || allDeleted.has(uid) || !kyc) continue;
+        localStorage.setItem(`zentro_kyc_${uid}`, JSON.stringify(kyc));
+        allKyc.push(kyc);
+      }
+      if (allKyc.length > 0) {
+        localStorage.setItem(KYC_REQUESTS_STORAGE_KEY, JSON.stringify(allKyc));
+      }
+    }
+
+    if (
+      serverDb.catalogs?.sponsorGlobalStats &&
+      typeof serverDb.catalogs.sponsorGlobalStats === 'object'
+    ) {
+      const localStatsRaw = localStorage.getItem(ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY);
+      const localStats = localStatsRaw ? JSON.parse(localStatsRaw) : null;
+      const srvStats = serverDb.catalogs.sponsorGlobalStats;
+      const locTime = new Date(localStats?.updatedAt || 0).getTime();
+      const srvTime = new Date(srvStats?.updatedAt || 0).getTime();
+      if (!localStats || srvTime > locTime) {
+        localStorage.setItem(
+          ADMIN_SPONSOR_GLOBAL_STATS_STORAGE_KEY,
+          JSON.stringify(srvStats)
+        );
+      }
+    }
+
+    reconcileFiveLevelReferralTreesLocal();
+    window.dispatchEvent(new CustomEvent('zentro-db-synced'));
+  } catch {
+    // ignore network error in offline mode
+  } finally {
+    isSyncingCentralDb = false;
+  }
+}
+
+export async function loginUserViaCentralDatabase(
+  identifier: string,
+  password: string
+): Promise<{
+  ok: boolean;
+  uid?: string;
+  profile?: UserProfile;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/db/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, password }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.ok || !data?.account?.profile) {
+      return {
+        ok: false,
+        error: data?.error || 'Account not found or invalid credentials.',
+      };
+    }
+
+    const uid = data.uid || data.account.profile.uid;
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    const accounts: Record<string, { profile: UserProfile; password: string }> =
+      rawAccounts ? JSON.parse(rawAccounts) : {};
+    accounts[uid] = {
+      profile: data.account.profile,
+      password: data.account.password || password,
+    };
+    localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+
+    if (Array.isArray(data.transactions)) {
+      localStorage.setItem(`zentro_tx_${uid}`, JSON.stringify(data.transactions));
+    }
+    if (Array.isArray(data.bankAccounts)) {
+      localStorage.setItem(`zentro_banks_${uid}`, JSON.stringify(data.bankAccounts));
+    }
+    if (data.kycRecord) {
+      localStorage.setItem(`zentro_kyc_${uid}`, JSON.stringify(data.kycRecord));
+      saveLocalKycRequest(data.kycRecord);
+    }
+    if (Array.isArray(data.referrals)) {
+      localStorage.setItem(`zentro_refs_${uid}`, JSON.stringify(data.referrals));
+    }
+    if (Array.isArray(data.depositRequests)) {
+      localStorage.setItem(
+        `${DEPOSIT_REQUESTS_STORAGE_PREFIX}${uid}`,
+        JSON.stringify(data.depositRequests)
+      );
+    }
+    if (Array.isArray(data.withdrawalRequests)) {
+      localStorage.setItem(
+        `${WITHDRAWAL_REQUESTS_STORAGE_PREFIX}${uid}`,
+        JSON.stringify(data.withdrawalRequests)
+      );
+    }
+    if (Array.isArray(data.notifications)) {
+      localStorage.setItem(
+        `${USER_NOTIFICATIONS_PREFIX}${uid}`,
+        JSON.stringify(data.notifications)
+      );
+    }
+
+    // Also pull all other accounts from data.db so 5-level referral chains are complete on this device
+    if (data.db?.accounts && typeof data.db.accounts === 'object') {
+      const mergedAccs = { ...data.db.accounts, ...accounts };
+      localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(mergedAccs));
+    }
+    reconcileFiveLevelReferralTreesLocal();
+
+    return {
+      ok: true,
+      uid,
+      profile: data.account.profile,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: 'Unable to reach central server database.',
+    };
+  }
+}
+
+export async function deleteUserFromCentralDatabaseAndLocal(
+  uid: string,
+  username?: string
+): Promise<void> {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    addLocalDeletedUid(uid);
+
+    const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+    if (rawAccounts) {
+      const accounts = JSON.parse(rawAccounts);
+      delete accounts[uid];
+      localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+    }
+
+    localStorage.removeItem(`zentro_tx_${uid}`);
+    localStorage.removeItem(`zentro_banks_${uid}`);
+    localStorage.removeItem(`zentro_kyc_${uid}`);
+    localStorage.removeItem(`zentro_refs_${uid}`);
+    localStorage.removeItem(`${DEPOSIT_REQUESTS_STORAGE_PREFIX}${uid}`);
+    localStorage.removeItem(`${WITHDRAWAL_REQUESTS_STORAGE_PREFIX}${uid}`);
+    localStorage.removeItem(`${USER_NOTIFICATIONS_PREFIX}${uid}`);
+    localStorage.removeItem(`zentro_live_mining_v1_${uid}`);
+
+    const rawKycList = localStorage.getItem(KYC_REQUESTS_STORAGE_KEY);
+    if (rawKycList) {
+      const parsed = JSON.parse(rawKycList);
+      if (Array.isArray(parsed)) {
+        localStorage.setItem(
+          KYC_REQUESTS_STORAGE_KEY,
+          JSON.stringify(parsed.filter((r: any) => r?.userId !== uid))
+        );
+      }
+    }
+
+    const activeUid = localStorage.getItem('zentro_active_session_uid');
+    if (activeUid === uid) {
+      localStorage.removeItem('zentro_active_session_uid');
+    }
+
+    clearDeviceAccountLockForUser(uid, username);
+
+    await fetch('/api/db/delete-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid, username }),
+    }).catch(() => {});
+
+    window.dispatchEvent(new CustomEvent('zentro-db-synced'));
+  } catch (e) {
+    console.error('Failed to delete user:', e);
+  }
 }
 

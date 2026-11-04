@@ -17,17 +17,24 @@ import {
   Flame,
   Calendar,
   TrendingUp,
+  Coins,
 } from 'lucide-react';
 import {
   SponsorCountryItem,
+  PlatformSponsorGlobalStats,
   VipTierConfig,
   ZentroPlatformTask,
   VipDayChallengeConfig,
   VIP_TIER_IMAGES,
+  PLATFORM_STATS_IMAGES,
   buildDefaultCountryFlagSvgUri,
   getSponsorCountriesCatalog,
   saveSponsorCountriesCatalog,
   resetSponsorCountriesCatalogToDefault,
+  getPlatformSponsorGlobalStats,
+  savePlatformSponsorGlobalStats,
+  resetPlatformSponsorGlobalStatsToDefault,
+  syncCentralDatabaseWithServer,
   getVipTiersCatalog,
   saveVipTiersCatalog,
   resetVipTiersCatalogToDefault,
@@ -56,6 +63,20 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
   const [countries, setCountries] = useState<SponsorCountryItem[]>(() =>
     getSponsorCountriesCatalog()
   );
+  const [globalStats, setGlobalStats] = useState<PlatformSponsorGlobalStats>(() =>
+    getPlatformSponsorGlobalStats()
+  );
+  const [allMembersInput, setAllMembersInput] = useState<string>(() =>
+    String(getPlatformSponsorGlobalStats().totalMembersCount)
+  );
+  const [totalInvestingInput, setTotalInvestingInput] = useState<string>(() =>
+    String(getPlatformSponsorGlobalStats().totalInvestingLkr)
+  );
+  const [totalPayoutInput, setTotalPayoutInput] = useState<string>(() =>
+    String(getPlatformSponsorGlobalStats().totalPayoutLkr)
+  );
+  const [syncCountriesWithTotal, setSyncCountriesWithTotal] = useState<boolean>(true);
+
   const [memberDrafts, setMemberDrafts] = useState<Record<string, string>>({});
   const [editingCountry, setEditingCountry] = useState<SponsorCountryItem | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
@@ -71,10 +92,58 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
   const [formFlagUri, setFormFlagUri] = useState('');
 
   useEffect(() => {
-    const sync = () => setCountries(getSponsorCountriesCatalog());
+    const sync = () => {
+      setCountries(getSponsorCountriesCatalog());
+      const freshStats = getPlatformSponsorGlobalStats();
+      setGlobalStats(freshStats);
+      setAllMembersInput(String(freshStats.totalMembersCount));
+      setTotalInvestingInput(String(freshStats.totalInvestingLkr));
+      setTotalPayoutInput(String(freshStats.totalPayoutLkr));
+    };
     window.addEventListener('zentro-catalog-updated', sync);
-    return () => window.removeEventListener('zentro-catalog-updated', sync);
+    window.addEventListener('zentro-db-synced', sync);
+    return () => {
+      window.removeEventListener('zentro-catalog-updated', sync);
+      window.removeEventListener('zentro-db-synced', sync);
+    };
   }, []);
+
+  const handleSaveGlobalStats = (customPatch?: Partial<PlatformSponsorGlobalStats>) => {
+    const nextMembers =
+      typeof customPatch?.totalMembersCount === 'number'
+        ? Math.max(0, Math.round(customPatch.totalMembersCount))
+        : Math.max(0, Math.round(Number(allMembersInput) || 0));
+    const nextInvesting =
+      typeof customPatch?.totalInvestingLkr === 'number'
+        ? Math.max(0, Number(customPatch.totalInvestingLkr))
+        : Math.max(0, Number(totalInvestingInput) || 0);
+    const nextPayout =
+      typeof customPatch?.totalPayoutLkr === 'number'
+        ? Math.max(0, Number(customPatch.totalPayoutLkr))
+        : Math.max(0, Number(totalPayoutInput) || 0);
+
+    const saved = savePlatformSponsorGlobalStats(
+      {
+        totalMembersCount: nextMembers,
+        totalInvestingLkr: nextInvesting,
+        totalPayoutLkr: nextPayout,
+      },
+      syncCountriesWithTotal
+    );
+    setGlobalStats(saved);
+    setCountries(getSponsorCountriesCatalog());
+    setAllMembersInput(String(saved.totalMembersCount));
+    setTotalInvestingInput(String(saved.totalInvestingLkr));
+    setTotalPayoutInput(String(saved.totalPayoutLkr));
+    setMemberDrafts({});
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+    onNotice(
+      `Saved Global Metrics — All Members: ${saved.totalMembersCount.toLocaleString()} · Total Investing: ${formatCurrencyValue(
+        saved.totalInvestingLkr,
+        'LKR'
+      )} LKR · Total Payout: ${formatCurrencyValue(saved.totalPayoutLkr, 'LKR')} LKR.`
+    );
+  };
 
   const openAddModal = () => {
     setEditingCountry(null);
@@ -133,6 +202,7 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
       };
       const next = [...countries, newItem];
       setCountries(saveSponsorCountriesCatalog(next));
+      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
       onNotice(
         `Added Sponsor Country "${cleanNameEn}" (${membersCount.toLocaleString()} members).`
       );
@@ -153,6 +223,7 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
           : c
       );
       setCountries(saveSponsorCountriesCatalog(next));
+      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
       onNotice(
         `Updated Sponsor Country "${cleanNameEn}" (${membersCount.toLocaleString()} members).`
       );
@@ -171,6 +242,7 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
     );
     setCountries(saveSponsorCountriesCatalog(next));
     setMemberDrafts((prev) => ({ ...prev, [country.id]: String(nextMembers) }));
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     onNotice(
       `Updated ${country.nameEn} registered members to ${nextMembers.toLocaleString()}.`
     );
@@ -179,20 +251,27 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
   const handleDeleteCountry = (country: SponsorCountryItem) => {
     const next = countries.filter((c) => c.id !== country.id);
     setCountries(saveSponsorCountriesCatalog(next));
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     onNotice(`Deleted Sponsor Country "${country.nameEn}".`);
   };
 
   const handleResetCountries = () => {
     const fresh = resetSponsorCountriesCatalogToDefault();
+    const freshStats = resetPlatformSponsorGlobalStatsToDefault();
     setCountries(fresh);
+    setGlobalStats(freshStats);
+    setAllMembersInput(String(freshStats.totalMembersCount));
+    setTotalInvestingInput(String(freshStats.totalInvestingLkr));
+    setTotalPayoutInput(String(freshStats.totalPayoutLkr));
     setMemberDrafts({});
-    onNotice('Reset Sponsor Countries & Member Counts to default 8 countries.');
+    syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+    onNotice('Reset Sponsor Countries, All Members Count, Investing & Payout to default.');
   };
 
-  const totalMembers = countries.reduce(
-    (sum, c) => sum + (Number(c.registeredUsers) || 0),
-    0
-  );
+  const totalMembers =
+    typeof globalStats.totalMembersCount === 'number' && globalStats.totalMembersCount > 0
+      ? globalStats.totalMembersCount
+      : countries.reduce((sum, c) => sum + (Number(c.registeredUsers) || 0), 0);
 
   return (
     <div className="space-y-5">
@@ -207,15 +286,14 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-pink-500/15 border border-pink-500/35 text-pink-400 text-[11px] font-mono font-extrabold">
             <Globe className="w-3.5 h-3.5" />
-            <span>SPONSOR COUNTRIES &amp; REGISTERED MEMBERS CONTROL</span>
+            <span>SPONSOR COUNTRIES &amp; ALL MEMBERS COUNT CONTROL</span>
           </div>
           <h2 className="text-lg sm:text-xl font-extrabold font-display">
-            Manage Sponsor Countries &amp; Edit Member Counts ({countries.length} Countries ·{' '}
+            Manage Sponsor Countries &amp; Edit All Members Count ({countries.length} Countries ·{' '}
             {totalMembers.toLocaleString()} Total Members)
           </h2>
           <p className="text-xs text-slate-400">
-            Add new sponsor countries, edit country names/flags, delete countries, or directly
-            edit registered member counts shown on the Home tab marquee.
+            Directly edit All Members Count, Total Investing, Total Payout, or individual Sponsor Country member counts shown on the Home tab.
           </p>
         </div>
 
@@ -241,6 +319,275 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Reset Default (8)</span>
           </button>
+        </div>
+      </div>
+
+      {/* Master Global Metrics Editor: Edit All Members Count, Total Investing & Total Payout */}
+      <div
+        className={`p-5 rounded-3xl border space-y-4 ${
+          isDark
+            ? 'bg-[#121c33]/95 border-sky-500/35 shadow-lg'
+            : 'bg-white border-sky-200 shadow-sm'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+          <div>
+            <h3 className="text-sm sm:text-base font-extrabold font-display flex items-center gap-2">
+              <Users className="w-4 h-4 text-sky-400" />
+              <span>
+                Edit All Members Count, Total Investing &amp; Total Payout (Displayed Under Sponsor Countries)
+              </span>
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              Admin can edit the global All Members Count and financial totals displayed right under the Sponsor Countries marquee.
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 text-xs font-bold cursor-pointer">
+            <input
+              type="checkbox"
+              checked={syncCountriesWithTotal}
+              onChange={(e) => setSyncCountriesWithTotal(e.target.checked)}
+              className="rounded border-white/20 accent-pink-500"
+            />
+            <span className="text-slate-300">
+              Proportionally scale country member counts when editing All Members Count
+            </span>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* 1. Edit All Members Count */}
+          <div
+            className={`p-4 rounded-2xl border space-y-2.5 ${
+              isDark ? 'bg-[#0e1629] border-sky-500/30' : 'bg-sky-50/50 border-sky-200'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-mono uppercase font-bold text-sky-400 flex items-center gap-2 min-w-0">
+                <img
+                  src={PLATFORM_STATS_IMAGES.members}
+                  alt="Total Members"
+                  className="w-10 h-10 rounded-xl object-cover border border-sky-400/50 shadow-sm shrink-0"
+                />
+                <span className="truncate">Total Members</span>
+              </span>
+              <span className="font-mono font-extrabold text-sky-400 text-sm tabular-nums">
+                {totalMembers.toLocaleString()}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                value={allMembersInput}
+                onChange={(e) => setAllMembersInput(e.target.value)}
+                className={`w-full px-3 py-2 rounded-xl border text-xs font-mono font-extrabold ${
+                  isDark
+                    ? 'bg-[#16223d] border-white/15 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => handleSaveGlobalStats()}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 text-white text-xs font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalMembersCount: Math.max(0, totalMembers - 10000),
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                -10,000
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalMembersCount: totalMembers + 1000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +1,000
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalMembersCount: totalMembers + 10000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +10,000
+              </button>
+            </div>
+          </div>
+
+          {/* 2. Edit Total Invested (LKR) */}
+          <div
+            className={`p-4 rounded-2xl border space-y-2.5 ${
+              isDark ? 'bg-[#0e1629] border-pink-500/30' : 'bg-pink-50/50 border-pink-200'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-mono uppercase font-bold text-pink-400 flex items-center gap-2 min-w-0">
+                <img
+                  src={PLATFORM_STATS_IMAGES.invested}
+                  alt="Total Invested"
+                  className="w-10 h-10 rounded-xl object-cover border border-pink-400/50 shadow-sm shrink-0"
+                />
+                <span className="truncate">Total Invested (LKR)</span>
+              </span>
+              <span className="font-mono font-extrabold text-pink-400 text-sm tabular-nums">
+                {formatCurrencyValue(globalStats.totalInvestingLkr, 'LKR')} LKR
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                value={totalInvestingInput}
+                onChange={(e) => setTotalInvestingInput(e.target.value)}
+                className={`w-full px-3 py-2 rounded-xl border text-xs font-mono font-extrabold ${
+                  isDark
+                    ? 'bg-[#16223d] border-white/15 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => handleSaveGlobalStats()}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-600 text-white text-xs font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalInvestingLkr: Math.max(0, globalStats.totalInvestingLkr - 1000000),
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                -1M LKR
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalInvestingLkr: globalStats.totalInvestingLkr + 1000000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +1M LKR
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalInvestingLkr: globalStats.totalInvestingLkr + 10000000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +10M LKR
+              </button>
+            </div>
+          </div>
+
+          {/* 3. Edit Total Payout (LKR) */}
+          <div
+            className={`p-4 rounded-2xl border space-y-2.5 ${
+              isDark
+                ? 'bg-[#0e1629] border-emerald-500/30'
+                : 'bg-emerald-50/50 border-emerald-200'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-mono uppercase font-bold text-emerald-400 flex items-center gap-2 min-w-0">
+                <img
+                  src={PLATFORM_STATS_IMAGES.payout}
+                  alt="Total Payout"
+                  className="w-10 h-10 rounded-xl object-cover border border-emerald-400/50 shadow-sm shrink-0"
+                />
+                <span className="truncate">Total Payout (LKR)</span>
+              </span>
+              <span className="font-mono font-extrabold text-emerald-400 text-sm tabular-nums">
+                {formatCurrencyValue(globalStats.totalPayoutLkr, 'LKR')} LKR
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                value={totalPayoutInput}
+                onChange={(e) => setTotalPayoutInput(e.target.value)}
+                className={`w-full px-3 py-2 rounded-xl border text-xs font-mono font-extrabold ${
+                  isDark
+                    ? 'bg-[#16223d] border-white/15 text-white'
+                    : 'bg-white border-slate-300 text-slate-900'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => handleSaveGlobalStats()}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-xs font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalPayoutLkr: Math.max(0, globalStats.totalPayoutLkr - 1000000),
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                -1M LKR
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalPayoutLkr: globalStats.totalPayoutLkr + 1000000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +1M LKR
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveGlobalStats({
+                    totalPayoutLkr: globalStats.totalPayoutLkr + 5000000,
+                  })
+                }
+                className="flex-1 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-mono font-bold cursor-pointer"
+              >
+                +5M LKR
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

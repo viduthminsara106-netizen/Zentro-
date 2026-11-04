@@ -844,7 +844,7 @@ export const LiveMiningPanel: React.FC<LiveMiningPanelProps> = ({
               {tr(profile, 'Daily Yield', 'දෛනික ආදායම')}
             </div>
             <div className="text-sm sm:text-base font-extrabold text-amber-400 mt-0.5 tabular-nums truncate">
-              +{formatCurrencyValue(dailyInActiveCurrency, activeCurrency)} {activeCurrency}
+              +{formatCurrencyValue(dailyMiningLkr, activeCurrency)} {activeCurrency}
             </div>
           </div>
 
@@ -870,7 +870,7 @@ export const LiveMiningPanel: React.FC<LiveMiningPanelProps> = ({
               {tr(profile, 'Total Mined', 'මුළු පතල් ආදායම')}
             </div>
             <div className="text-sm sm:text-base font-extrabold text-emerald-400 mt-0.5 tabular-nums truncate">
-              +{formatCurrencyValue(totalMinedInCurrency, activeCurrency)} {activeCurrency}
+              +{formatCurrencyValue(miningState.totalMinedLkr, activeCurrency)} {activeCurrency}
             </div>
           </div>
         </div>
