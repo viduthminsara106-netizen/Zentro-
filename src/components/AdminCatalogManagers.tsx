@@ -26,7 +26,6 @@ import {
   ZentroPlatformTask,
   VipDayChallengeConfig,
   VIP_TIER_IMAGES,
-  PLATFORM_STATS_IMAGES,
   buildDefaultCountryFlagSvgUri,
   getSponsorCountriesCatalog,
   saveSponsorCountriesCatalog,
@@ -362,16 +361,12 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
               isDark ? 'bg-[#0e1629] border-sky-500/30' : 'bg-sky-50/50 border-sky-200'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono uppercase font-bold text-sky-400 flex items-center gap-2 min-w-0">
-                <img
-                  src={PLATFORM_STATS_IMAGES.members}
-                  alt="Total Members"
-                  className="w-10 h-10 rounded-xl object-cover border border-sky-400/50 shadow-sm shrink-0"
-                />
-                <span className="truncate">Total Members</span>
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-mono uppercase font-bold text-sky-400 flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5" />
+                <span>All Members Count</span>
               </span>
-              <span className="font-mono font-extrabold text-sky-400 text-sm tabular-nums">
+              <span className="font-mono font-extrabold text-sky-400">
                 {totalMembers.toLocaleString()}
               </span>
             </div>
@@ -433,22 +428,18 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
             </div>
           </div>
 
-          {/* 2. Edit Total Invested (LKR) */}
+          {/* 2. Edit Total Investing (LKR) */}
           <div
             className={`p-4 rounded-2xl border space-y-2.5 ${
               isDark ? 'bg-[#0e1629] border-pink-500/30' : 'bg-pink-50/50 border-pink-200'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono uppercase font-bold text-pink-400 flex items-center gap-2 min-w-0">
-                <img
-                  src={PLATFORM_STATS_IMAGES.invested}
-                  alt="Total Invested"
-                  className="w-10 h-10 rounded-xl object-cover border border-pink-400/50 shadow-sm shrink-0"
-                />
-                <span className="truncate">Total Invested (LKR)</span>
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-mono uppercase font-bold text-pink-400 flex items-center gap-1.5">
+                <TrendingUp className="w-3.5 h-3.5" />
+                <span>Total Investing (LKR)</span>
               </span>
-              <span className="font-mono font-extrabold text-pink-400 text-sm tabular-nums">
+              <span className="font-mono font-extrabold text-pink-400">
                 {formatCurrencyValue(globalStats.totalInvestingLkr, 'LKR')} LKR
               </span>
             </div>
@@ -518,16 +509,12 @@ export const AdminSponsorCountriesManager: React.FC<ManagerProps> = ({
                 : 'bg-emerald-50/50 border-emerald-200'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono uppercase font-bold text-emerald-400 flex items-center gap-2 min-w-0">
-                <img
-                  src={PLATFORM_STATS_IMAGES.payout}
-                  alt="Total Payout"
-                  className="w-10 h-10 rounded-xl object-cover border border-emerald-400/50 shadow-sm shrink-0"
-                />
-                <span className="truncate">Total Payout (LKR)</span>
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-mono uppercase font-bold text-emerald-400 flex items-center gap-1.5">
+                <Coins className="w-3.5 h-3.5" />
+                <span>Total Payout (LKR)</span>
               </span>
-              <span className="font-mono font-extrabold text-emerald-400 text-sm tabular-nums">
+              <span className="font-mono font-extrabold text-emerald-400">
                 {formatCurrencyValue(globalStats.totalPayoutLkr, 'LKR')} LKR
               </span>
             </div>

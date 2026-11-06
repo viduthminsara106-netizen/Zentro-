@@ -18,7 +18,6 @@ import {
   SponsorCountryItem,
   VipTierConfig,
   PlatformSponsorGlobalStats,
-  PLATFORM_STATS_IMAGES,
   getSponsorCountriesCatalog,
   getPlatformSponsorGlobalStats,
   getVipTiersCatalog,
@@ -153,143 +152,88 @@ export const SponsorCountriesSection: React.FC<{
         </div>
       )}
 
-      {/* Global Platform Summary Row Under Sponsor Countries: Total Members, Total Invested, Total Payout with Creative Front Images */}
+      {/* Global Platform Summary Row Under Sponsor Countries: Total Members, Total Investing, Total Payout */}
       <div
-        className={`grid grid-cols-1 md:grid-cols-3 gap-3 pt-3 border-t ${
+        className={`grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t ${
           isDark ? 'border-white/10' : 'border-pink-200/70'
         }`}
       >
-        {/* 1. Total Members Card with Front Illustrated Image */}
+        {/* 1. Total Members */}
         <div
-          className={`group relative overflow-hidden p-3 sm:p-3.5 rounded-2xl border flex items-center gap-3.5 transition-all duration-200 hover:-translate-y-0.5 ${
+          className={`px-3.5 py-2.5 rounded-xl border flex items-center justify-between gap-2 ${
             isDark
-              ? 'bg-gradient-to-br from-[#0c1933]/95 via-[#0f2242]/95 to-[#161836]/95 border-sky-500/35 hover:border-sky-400/70 shadow-md'
-              : 'bg-gradient-to-br from-sky-50/90 via-white to-blue-50/80 border-sky-200 hover:border-sky-400 shadow-xs'
+              ? 'bg-[#0e1629]/90 border-sky-500/30'
+              : 'bg-sky-50/70 border-sky-200'
           }`}
         >
-          {/* Ambient Glow */}
-          <div className="pointer-events-none absolute -right-6 -bottom-6 w-24 h-24 rounded-full bg-sky-500/15 blur-2xl" />
-
-          {/* Creative Image in Front of Total Members */}
-          <div className="relative shrink-0">
-            <div className="pointer-events-none absolute -inset-1 rounded-2xl bg-gradient-to-br from-sky-400 to-blue-600 opacity-35 blur-xs group-hover:opacity-65 transition-opacity" />
-            <img
-              src={PLATFORM_STATS_IMAGES.members}
-              alt={tr(profile, 'Total Members Illustration', 'මුළු සාමාජිකයන්')}
-              className="relative w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover border border-sky-400/50 shadow-md"
-            />
-            <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-400 border-2 border-slate-950 animate-pulse" />
-          </div>
-
-          {/* Clear & User-Friendly Metric Details */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-1.5">
-              <span className="text-[11px] font-mono font-extrabold uppercase tracking-wider text-sky-500 dark:text-sky-300 truncate">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
+              <Users className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
                 {tr(profile, 'Total Members', 'මුළු සාමාජිකයන්')}
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 dark:text-emerald-300 text-[9px] font-mono font-extrabold shrink-0">
-                ● LIVE
-              </span>
-            </div>
-            <div className="text-lg sm:text-xl font-mono font-extrabold text-sky-600 dark:text-white tabular-nums tracking-tight mt-0.5 truncate">
-              {totalGlobalUsers.toLocaleString()}
-            </div>
-            <div className="text-[10px] text-slate-500 dark:text-slate-400 font-medium truncate">
-              {tr(
-                profile,
-                'Verified Global VIP Community',
-                'ලොව පුරා ලියාපදිංචි සක්‍රිය සාමාජිකයන්'
-              )}
+              </div>
+              <div className="text-sm sm:text-base font-mono font-extrabold text-sky-400 tabular-nums">
+                {totalGlobalUsers.toLocaleString()}
+              </div>
             </div>
           </div>
+          <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 text-[9px] font-mono font-bold shrink-0">
+            ● LIVE
+          </span>
         </div>
 
-        {/* 2. Total Invested Card with Front Illustrated Image */}
+        {/* 2. Total Investing */}
         <div
-          className={`group relative overflow-hidden p-3 sm:p-3.5 rounded-2xl border flex items-center gap-3.5 transition-all duration-200 hover:-translate-y-0.5 ${
+          className={`px-3.5 py-2.5 rounded-xl border flex items-center justify-between gap-2 ${
             isDark
-              ? 'bg-gradient-to-br from-[#230d2a]/95 via-[#2a1235]/95 to-[#171636]/95 border-pink-500/35 hover:border-pink-400/70 shadow-md'
-              : 'bg-gradient-to-br from-pink-50/90 via-white to-rose-50/80 border-pink-200 hover:border-pink-400 shadow-xs'
+              ? 'bg-[#0e1629]/90 border-pink-500/30'
+              : 'bg-pink-50/70 border-pink-200'
           }`}
         >
-          {/* Ambient Glow */}
-          <div className="pointer-events-none absolute -right-6 -bottom-6 w-24 h-24 rounded-full bg-pink-500/15 blur-2xl" />
-
-          {/* Creative Image in Front of Total Invested */}
-          <div className="relative shrink-0">
-            <div className="pointer-events-none absolute -inset-1 rounded-2xl bg-gradient-to-br from-pink-500 to-amber-500 opacity-35 blur-xs group-hover:opacity-65 transition-opacity" />
-            <img
-              src={PLATFORM_STATS_IMAGES.invested}
-              alt={tr(profile, 'Total Invested Illustration', 'මුළු ආයෝජන')}
-              className="relative w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover border border-pink-400/50 shadow-md"
-            />
-          </div>
-
-          {/* Clear & User-Friendly Metric Details */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-1.5">
-              <span className="text-[11px] font-mono font-extrabold uppercase tracking-wider text-pink-600 dark:text-pink-300 truncate">
-                {tr(profile, 'Total Invested', 'මුළු ආයෝජන')}
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-pink-500/15 border border-pink-500/30 text-pink-600 dark:text-pink-300 text-[9px] font-mono font-extrabold shrink-0">
-                VIP POOL
-              </span>
-            </div>
-            <div className="text-lg sm:text-xl font-mono font-extrabold text-pink-600 dark:text-white tabular-nums tracking-tight mt-0.5 truncate">
-              {formatSiteAmount(globalStats.totalInvestingLkr || 485920000, activeCurrency)}
-            </div>
-            <div className="text-[10px] text-slate-500 dark:text-slate-400 font-medium truncate">
-              {tr(
-                profile,
-                'Active VIP Packages & Mining Capital',
-                'සක්‍රිය VIP සහ පතල් කැණීම් ආයෝජන'
-              )}
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg bg-pink-500/15 border border-pink-500/30 flex items-center justify-center text-pink-400 shrink-0">
+              <TrendingUp className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
+                {tr(profile, 'Total Investing', 'මුළු ආයෝජන')}
+              </div>
+              <div className="text-sm sm:text-base font-mono font-extrabold text-pink-500 dark:text-pink-400 tabular-nums truncate">
+                {formatSiteAmount(globalStats.totalInvestingLkr || 485920000, activeCurrency)}
+              </div>
             </div>
           </div>
+          <span className="px-2 py-0.5 rounded-md bg-pink-500/15 text-pink-400 text-[9px] font-mono font-bold shrink-0">
+            VIP POOL
+          </span>
         </div>
 
-        {/* 3. Total Payout Card with Front Illustrated Image */}
+        {/* 3. Total Payout */}
         <div
-          className={`group relative overflow-hidden p-3 sm:p-3.5 rounded-2xl border flex items-center gap-3.5 transition-all duration-200 hover:-translate-y-0.5 ${
+          className={`px-3.5 py-2.5 rounded-xl border flex items-center justify-between gap-2 ${
             isDark
-              ? 'bg-gradient-to-br from-[#072622]/95 via-[#0b2e2a]/95 to-[#102038]/95 border-emerald-500/35 hover:border-emerald-400/70 shadow-md'
-              : 'bg-gradient-to-br from-emerald-50/90 via-white to-teal-50/80 border-emerald-200 hover:border-emerald-400 shadow-xs'
+              ? 'bg-[#0e1629]/90 border-emerald-500/30'
+              : 'bg-emerald-50/70 border-emerald-200'
           }`}
         >
-          {/* Ambient Glow */}
-          <div className="pointer-events-none absolute -right-6 -bottom-6 w-24 h-24 rounded-full bg-emerald-500/15 blur-2xl" />
-
-          {/* Creative Image in Front of Total Payout */}
-          <div className="relative shrink-0">
-            <div className="pointer-events-none absolute -inset-1 rounded-2xl bg-gradient-to-br from-emerald-400 to-amber-400 opacity-35 blur-xs group-hover:opacity-65 transition-opacity" />
-            <img
-              src={PLATFORM_STATS_IMAGES.payout}
-              alt={tr(profile, 'Total Payout Illustration', 'මුළු ගෙවීම්')}
-              className="relative w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover border border-emerald-400/50 shadow-md"
-            />
-          </div>
-
-          {/* Clear & User-Friendly Metric Details */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-1.5">
-              <span className="text-[11px] font-mono font-extrabold uppercase tracking-wider text-emerald-600 dark:text-emerald-300 truncate">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+              <Coins className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 truncate">
                 {tr(profile, 'Total Payout', 'මුළු ගෙවීම්')}
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-600 dark:text-emerald-300 text-[9px] font-mono font-extrabold shrink-0">
-                VERIFIED
-              </span>
-            </div>
-            <div className="text-lg sm:text-xl font-mono font-extrabold text-emerald-600 dark:text-white tabular-nums tracking-tight mt-0.5 truncate">
-              {formatSiteAmount(globalStats.totalPayoutLkr || 194368000, activeCurrency)}
-            </div>
-            <div className="text-[10px] text-slate-500 dark:text-slate-400 font-medium truncate">
-              {tr(
-                profile,
-                'Instant Bank & USDT Disbursed',
-                'සාමාජිකයන් වෙත ගෙවා ඇති මුළු මුදල'
-              )}
+              </div>
+              <div className="text-sm sm:text-base font-mono font-extrabold text-emerald-500 dark:text-emerald-400 tabular-nums truncate">
+                {formatSiteAmount(globalStats.totalPayoutLkr || 194368000, activeCurrency)}
+              </div>
             </div>
           </div>
+          <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 text-[9px] font-mono font-bold shrink-0">
+            VERIFIED
+          </span>
         </div>
       </div>
     </div>
