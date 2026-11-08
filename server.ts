@@ -286,7 +286,7 @@ interface CentralDatabaseSchema {
   updatedAt: string;
 }
 
-const CENTRAL_DB_FILE = path.join(__dirname, '.zentro_central_db.json');
+const CENTRAL_DB_FILE = path.join(__dirname, 'zentro_central_database.json');
 
 let centralDb: CentralDatabaseSchema = {
   accounts: {},
@@ -361,6 +361,89 @@ function mergeRecordArraysById(existing: any[] = [], incoming: any[] = []): any[
   });
 }
 
+function normalizeReferralCodeKey(raw: unknown): string {
+  const str = String(raw || '').trim();
+  if (!str) return '';
+  try {
+    if (str.includes('?') || str.includes('ref=') || str.includes('invite=') || str.includes('code=')) {
+      const m = str.match(/[?&](?:ref|invite|code)=([A-Za-z0-9_-]+)/i);
+      if (m && m[1]) return m[1].trim().toUpperCase();
+    }
+  } catch {
+    // ignore
+  }
+  return str.toUpperCase();
+}
+
+function normalizePhoneCore(rawMobile: unknown, rawCountryCode?: unknown): string {
+  let digits = String(rawMobile || '').replace(/[^0-9]/g, '');
+  if (!digits) return '';
+  const ccDigits = String(rawCountryCode || '').replace(/[^0-9]/g, '');
+  if (ccDigits && digits.startsWith(ccDigits) && digits.length > ccDigits.length + 5) {
+    digits = digits.slice(ccDigits.length);
+  }
+  digits = digits.replace(/^0+/, '');
+  return digits;
+}
+
+function getServerFriendRegBonusForVip(vipLevel: number): number {
+  const lvl = Number(vipLevel) || 0;
+  if (lvl === 1) return 10;
+  if (lvl === 2) return 30;
+  if (lvl === 3) return 50;
+  if (lvl >= 4) return 100;
+  return 0;
+}
+
+function getServerCommissionRatesForVip(
+  vipLevel: number
+): { level: number; ratePercent: number; rate: number }[] {
+  const lvl = Number(vipLevel) || 0;
+  if (lvl === 1) {
+    return [
+      { level: 1, ratePercent: 10, rate: 0.1 },
+      { level: 2, ratePercent: 6, rate: 0.06 },
+      { level: 3, ratePercent: 2, rate: 0.02 },
+      { level: 4, ratePercent: 1, rate: 0.01 },
+      { level: 5, ratePercent: 1, rate: 0.01 },
+    ];
+  }
+  if (lvl === 2) {
+    return [
+      { level: 1, ratePercent: 15, rate: 0.15 },
+      { level: 2, ratePercent: 10, rate: 0.1 },
+      { level: 3, ratePercent: 6, rate: 0.06 },
+      { level: 4, ratePercent: 2, rate: 0.02 },
+      { level: 5, ratePercent: 1, rate: 0.01 },
+    ];
+  }
+  if (lvl === 3) {
+    return [
+      { level: 1, ratePercent: 20, rate: 0.2 },
+      { level: 2, ratePercent: 12, rate: 0.12 },
+      { level: 3, ratePercent: 8, rate: 0.08 },
+      { level: 4, ratePercent: 3, rate: 0.03 },
+      { level: 5, ratePercent: 1, rate: 0.01 },
+    ];
+  }
+  if (lvl >= 4) {
+    return [
+      { level: 1, ratePercent: 25, rate: 0.25 },
+      { level: 2, ratePercent: 16, rate: 0.16 },
+      { level: 3, ratePercent: 12, rate: 0.12 },
+      { level: 4, ratePercent: 5, rate: 0.05 },
+      { level: 5, ratePercent: 3, rate: 0.03 },
+    ];
+  }
+  return [
+    { level: 1, ratePercent: 0, rate: 0 },
+    { level: 2, ratePercent: 0, rate: 0 },
+    { level: 3, ratePercent: 0, rate: 0 },
+    { level: 4, ratePercent: 0, rate: 0 },
+    { level: 5, ratePercent: 0, rate: 0 },
+  ];
+}
+
 // Automatically reconcile 5-level referral downlines across all accounts in centralDb
 function reconcileCentralFiveLevelReferrals(): void {
   const deletedSet = new Set(centralDb.deletedUids || []);
@@ -370,19 +453,20 @@ function reconcileCentralFiveLevelReferrals(): void {
 
   const byRefCode = new Map<string, { profile: any; password: string }>();
   for (const entry of allEntries) {
-    const code = String(entry.profile.referralCode || '')
-      .trim()
-      .toUpperCase();
+    const code = normalizeReferralCodeKey(entry.profile.referralCode);
     if (code) {
       byRefCode.set(code, entry);
+      if (code.startsWith('ZENTRO-')) {
+        byRefCode.set(code.slice(7), entry);
+      } else {
+        byRefCode.set(`ZENTRO-${code}`, entry);
+      }
     }
   }
 
   for (const memberEntry of allEntries) {
     const member = memberEntry.profile;
-    let currentCode = String(member.referredBy || '')
-      .trim()
-      .toUpperCase();
+    let currentCode = normalizeReferralCodeKey(member.referredBy);
     const visitedUids = new Set<string>([member.uid]);
 
     for (let level = 1; level <= 5; level++) {
@@ -396,25 +480,106 @@ function reconcileCentralFiveLevelReferrals(): void {
       const uplineRefs: any[] = Array.isArray(centralDb.referrals[upline.uid])
         ? [...centralDb.referrals[upline.uid]]
         : [];
+      const uplineTx: any[] = Array.isArray(centralDb.transactions[upline.uid])
+        ? [...centralDb.transactions[upline.uid]]
+        : [];
+      const uplineNotifs: any[] = Array.isArray(centralDb.notifications[upline.uid])
+        ? [...centralDb.notifications[upline.uid]]
+        : [];
 
-      // Check if this downline member already has a registration/team entry at this tierLevel
-      const existingIdx = uplineRefs.findIndex(
-        (r) =>
+      // Check if L1 registration bonus should be credited to upline
+      const regBonusTxId = `tx_reg_bonus_${member.uid}_L1`;
+      const alreadyHasRegBonusTx = uplineTx.some((tx) => tx && tx.id === regBonusTxId);
+      let l1BonusToCredit = 0;
+
+      if (level === 1 && Number(upline.vipLevel || 0) >= 1 && !alreadyHasRegBonusTx) {
+        l1BonusToCredit = getServerFriendRegBonusForVip(Number(upline.vipLevel || 0));
+        if (l1BonusToCredit > 0) {
+          upline.balance = Number((Number(upline.balance || 0) + l1BonusToCredit).toFixed(2));
+          upline.totalEarnings = Number(
+            (Number(upline.totalEarnings || 0) + l1BonusToCredit).toFixed(2)
+          );
+          upline.updatedAt = new Date().toISOString();
+
+          uplineTx.unshift({
+            id: regBonusTxId,
+            userId: upline.uid,
+            type: 'referral_bonus',
+            amount: l1BonusToCredit,
+            status: 'completed',
+            description: `L1 Friend Registration Bonus (+${l1BonusToCredit} LKR — ${member.username})`,
+            createdAt: member.createdAt || new Date().toISOString(),
+          });
+          centralDb.transactions[upline.uid] = uplineTx;
+
+          const notifId = `notif_reg_${upline.uid}_${member.uid}_L1`;
+          if (!uplineNotifs.some((n) => n && n.id === notifId)) {
+            uplineNotifs.unshift({
+              id: notifId,
+              userId: upline.uid,
+              title: `New L1 Friend Registered: +${l1BonusToCredit} LKR Bonus!`,
+              titleSi: `නව L1 මිතුරෙකු ලියාපදිංචි විය: +${l1BonusToCredit} LKR ප්‍රසාද දීමනාව!`,
+              message: `${member.username} registered using your referral code (${upline.referralCode}). +${l1BonusToCredit} LKR has been credited to your wallet.`,
+              messageSi: `${member.username} ඔබගේ යොමු කේතය (${upline.referralCode}) භාවිතා කර ලියාපදිංචි විය. +${l1BonusToCredit} LKR ඔබගේ ගිණුමට එක් කරන ලදී.`,
+              category: 'referral',
+              priority: 'high',
+              read: false,
+              actionTab: 'team',
+              actionLabel: 'View Team',
+              actionLabelSi: 'කණ්ඩායම බලන්න',
+              createdAt: member.createdAt || new Date().toISOString(),
+            });
+            centralDb.notifications[upline.uid] = uplineNotifs;
+          }
+        }
+      } else if (level > 1) {
+        const notifId = `notif_reg_${upline.uid}_${member.uid}_L${level}`;
+        if (!uplineNotifs.some((n) => n && n.id === notifId)) {
+          uplineNotifs.unshift({
+            id: notifId,
+            userId: upline.uid,
+            title: `New Level ${level} Team Member Joined: ${member.username}`,
+            titleSi: `නව මට්ටම ${level} (L${level}) සාමාජිකයෙකු එක් විය: ${member.username}`,
+            message: `${member.username} joined your Level ${level} referral network. You will earn L${level} commissions when they activate VIP or deposit!`,
+            messageSi: `${member.username} ඔබගේ L${level} කණ්ඩායමට එක් විය. ඔවුන් VIP සක්‍රිය කරන විට හෝ තැන්පත් කරන විට ඔබට L${level} කොමිස් හිමිවේ!`,
+            category: 'referral',
+            priority: 'normal',
+            read: false,
+            actionTab: 'team',
+            actionLabel: 'Open Team Tree',
+            actionLabelSi: 'කණ්ඩායම බලන්න',
+            createdAt: member.createdAt || new Date().toISOString(),
+          });
+          centralDb.notifications[upline.uid] = uplineNotifs;
+        }
+      }
+
+      // Check if this downline member already has entries at this tierLevel
+      let foundEntryAtLevel = false;
+      for (let i = 0; i < uplineRefs.length; i++) {
+        const r = uplineRefs[i];
+        if (
           r &&
           String(r.referredUsername || '').toLowerCase() ===
             String(member.username || '').toLowerCase() &&
           Number(r.tierLevel) === level
-      );
-
-      if (existingIdx >= 0) {
-        // Keep vipLevel synced with the downline member's latest VIP level
-        if (Number(member.vipLevel || 0) > Number(uplineRefs[existingIdx].vipLevel || 0)) {
-          uplineRefs[existingIdx] = {
-            ...uplineRefs[existingIdx],
-            vipLevel: Number(member.vipLevel || 0),
+        ) {
+          foundEntryAtLevel = true;
+          const updatedVip = Math.max(Number(r.vipLevel || 0), Number(member.vipLevel || 0));
+          const updatedComm =
+            r.id === `ref_tree_${upline.uid}_${member.uid}_L1` && l1BonusToCredit > 0
+              ? Math.max(Number(r.commissionEarned || 0), l1BonusToCredit)
+              : Number(r.commissionEarned || 0);
+          uplineRefs[i] = {
+            ...r,
+            vipLevel: updatedVip,
+            commissionEarned: updatedComm,
           };
         }
-      } else {
+      }
+
+      if (!foundEntryAtLevel) {
+        const regTx = uplineTx.find((tx) => tx && tx.id === regBonusTxId);
         uplineRefs.unshift({
           id: `ref_tree_${upline.uid}_${member.uid}_L${level}`,
           referrerUid: upline.uid,
@@ -422,15 +587,13 @@ function reconcileCentralFiveLevelReferrals(): void {
           referralCodeUsed: upline.referralCode,
           tierLevel: level,
           vipLevel: Number(member.vipLevel || 0),
-          commissionEarned: 0,
+          commissionEarned: level === 1 ? Number(regTx?.amount || l1BonusToCredit || 0) : 0,
           createdAt: member.createdAt || new Date().toISOString(),
         });
       }
 
       centralDb.referrals[upline.uid] = uplineRefs;
-      currentCode = String(upline.referredBy || '')
-        .trim()
-        .toUpperCase();
+      currentCode = normalizeReferralCodeKey(upline.referredBy);
     }
   }
 }
@@ -441,6 +604,256 @@ app.get('/api/db/state', (_req, res) => {
     ok: true,
     db: centralDb,
   });
+});
+
+app.post('/api/db/register', (req, res) => {
+  try {
+    const { profile, password, welcomeTx } = req.body || {};
+    if (!profile || !profile.uid || !profile.username) {
+      res.status(400).json({ error: 'Invalid registration profile payload.' });
+      return;
+    }
+
+    reconcileCentralFiveLevelReferrals();
+    const deletedSet = new Set<string>(centralDb.deletedUids || []);
+
+    const cleanUsername = String(profile.username || '').trim().toLowerCase();
+    const cleanEmail = String(profile.email || '').trim().toLowerCase();
+
+    const duplicate = Object.values(centralDb.accounts).find(
+      (acc) =>
+        acc &&
+        acc.profile &&
+        !deletedSet.has(acc.profile.uid) &&
+        acc.profile.uid !== profile.uid &&
+        (String(acc.profile.username || '').trim().toLowerCase() === cleanUsername ||
+          String(acc.profile.email || '').trim().toLowerCase() === cleanEmail)
+    );
+    if (duplicate) {
+      res.status(409).json({
+        error: 'An account with this user name or email already exists. Please Sign in.',
+      });
+      return;
+    }
+
+    const normalizedReferredBy = normalizeReferralCodeKey(profile.referredBy);
+    const savedProfile = {
+      ...profile,
+      referredBy: normalizedReferredBy || profile.referredBy,
+      updatedAt: new Date().toISOString(),
+    };
+
+    centralDb.accounts[profile.uid] = {
+      profile: savedProfile,
+      password: String(password || 'zentro123'),
+    };
+
+    if (welcomeTx && welcomeTx.id) {
+      centralDb.transactions[profile.uid] = mergeRecordArraysById(
+        centralDb.transactions[profile.uid] || [],
+        [welcomeTx]
+      );
+    } else if (!centralDb.transactions[profile.uid]) {
+      centralDb.transactions[profile.uid] = [];
+    }
+
+    if (!centralDb.bankAccounts[profile.uid]) centralDb.bankAccounts[profile.uid] = [];
+    if (!centralDb.referrals[profile.uid]) centralDb.referrals[profile.uid] = [];
+    if (!centralDb.notifications[profile.uid]) centralDb.notifications[profile.uid] = [];
+
+    reconcileCentralFiveLevelReferrals();
+    saveCentralDbToDisk();
+
+    res.json({
+      ok: true,
+      uid: profile.uid,
+      account: centralDb.accounts[profile.uid],
+      db: centralDb,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to register user in central database.' });
+  }
+});
+
+app.post('/api/db/distribute-commissions', (req, res) => {
+  try {
+    const {
+      eventId,
+      memberProfile,
+      amountLkr = 0,
+      sourceLabel = 'Deposit / VIP Activation',
+      payCommissions = true,
+    } = req.body || {};
+
+    if (!memberProfile || !memberProfile.uid) {
+      res.status(400).json({ error: 'Missing memberProfile.' });
+      return;
+    }
+
+    const existingMemberEntry = centralDb.accounts[memberProfile.uid];
+    if (existingMemberEntry) {
+      centralDb.accounts[memberProfile.uid] = {
+        ...existingMemberEntry,
+        profile: {
+          ...existingMemberEntry.profile,
+          ...memberProfile,
+          highestVipLevel: Math.max(
+            Number(existingMemberEntry.profile?.highestVipLevel || 0),
+            Number(memberProfile.highestVipLevel || 0),
+            Number(memberProfile.vipLevel || 0)
+          ),
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    }
+
+    const deletedSet = new Set<string>(centralDb.deletedUids || []);
+    const allEntries = Object.values(centralDb.accounts).filter(
+      (entry) => entry && entry.profile && entry.profile.uid && !deletedSet.has(entry.profile.uid)
+    );
+    const byRefCode = new Map<string, { profile: any; password: string }>();
+    for (const entry of allEntries) {
+      const code = normalizeReferralCodeKey(entry.profile.referralCode);
+      if (code) {
+        byRefCode.set(code, entry);
+        if (code.startsWith('ZENTRO-')) {
+          byRefCode.set(code.slice(7), entry);
+        } else {
+          byRefCode.set(`ZENTRO-${code}`, entry);
+        }
+      }
+    }
+
+    const cleanEventKey = String(eventId || `${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '');
+    let currentCode = normalizeReferralCodeKey(memberProfile.referredBy);
+    const visitedUids = new Set<string>([memberProfile.uid]);
+
+    for (let tierLevel = 1; tierLevel <= 5; tierLevel++) {
+      if (!currentCode) break;
+      const uplineEntry = byRefCode.get(currentCode);
+      if (!uplineEntry || !uplineEntry.profile) break;
+      const uplineProfile = uplineEntry.profile;
+      if (visitedUids.has(uplineProfile.uid)) break;
+      visitedUids.add(uplineProfile.uid);
+
+      const uplineRefs: any[] = Array.isArray(centralDb.referrals[uplineProfile.uid])
+        ? [...centralDb.referrals[uplineProfile.uid]]
+        : [];
+
+      let foundMemberInRefs = false;
+      const updatedUplineRefs = uplineRefs.map((r) => {
+        if (
+          r &&
+          String(r.referredUsername || '').toLowerCase() ===
+            String(memberProfile.username || '').toLowerCase() &&
+          Number(r.tierLevel) === tierLevel
+        ) {
+          foundMemberInRefs = true;
+          return {
+            ...r,
+            vipLevel: Math.max(Number(r.vipLevel || 0), Number(memberProfile.vipLevel || 0)),
+          };
+        }
+        return r;
+      });
+
+      let commissionLkr = 0;
+      let ratePercent = 0;
+      if (payCommissions && Number(amountLkr) > 0 && Number(uplineProfile.vipLevel || 0) >= 1) {
+        const commLevels = getServerCommissionRatesForVip(Number(uplineProfile.vipLevel || 0));
+        const rateObj = commLevels.find((l) => l.level === tierLevel);
+        if (rateObj && rateObj.rate > 0) {
+          ratePercent = rateObj.ratePercent;
+          commissionLkr = Number((Number(amountLkr) * rateObj.rate).toFixed(2));
+        }
+      }
+
+      const commTxId = `tx_ref_comm_${cleanEventKey}_${memberProfile.uid}_L${tierLevel}`;
+      const commRefId = `ref_comm_${cleanEventKey}_${memberProfile.uid}_L${tierLevel}`;
+      const uplineTxList: any[] = Array.isArray(centralDb.transactions[uplineProfile.uid])
+        ? [...centralDb.transactions[uplineProfile.uid]]
+        : [];
+      const alreadyCredited = uplineTxList.some((tx) => tx && tx.id === commTxId);
+
+      if (commissionLkr > 0 && !alreadyCredited) {
+        uplineProfile.balance = Number(
+          (Number(uplineProfile.balance || 0) + commissionLkr).toFixed(2)
+        );
+        uplineProfile.totalEarnings = Number(
+          (Number(uplineProfile.totalEarnings || 0) + commissionLkr).toFixed(2)
+        );
+        uplineProfile.updatedAt = new Date().toISOString();
+
+        uplineTxList.unshift({
+          id: commTxId,
+          userId: uplineProfile.uid,
+          type: 'referral_bonus',
+          amount: commissionLkr,
+          status: 'completed',
+          description: `L${tierLevel} (${ratePercent}%) ${sourceLabel} Bonus from ${memberProfile.username}`,
+          createdAt: new Date().toISOString(),
+        });
+        centralDb.transactions[uplineProfile.uid] = uplineTxList;
+
+        if (!updatedUplineRefs.some((r) => r && r.id === commRefId)) {
+          updatedUplineRefs.unshift({
+            id: commRefId,
+            referrerUid: uplineProfile.uid,
+            referredUsername: memberProfile.username,
+            referralCodeUsed: uplineProfile.referralCode,
+            tierLevel,
+            vipLevel: Number(memberProfile.vipLevel || 0),
+            commissionEarned: commissionLkr,
+            createdAt: new Date().toISOString(),
+          });
+        }
+
+        const uplineNotifs: any[] = Array.isArray(centralDb.notifications[uplineProfile.uid])
+          ? [...centralDb.notifications[uplineProfile.uid]]
+          : [];
+        uplineNotifs.unshift({
+          id: `notif_comm_${cleanEventKey}_${memberProfile.uid}_L${tierLevel}`,
+          userId: uplineProfile.uid,
+          title: `Level ${tierLevel} Commission Earned: +${commissionLkr} LKR`,
+          titleSi: `මට්ටම ${tierLevel} කොමිස් මුදලක් ලැබුණි: +${commissionLkr} LKR`,
+          message: `You earned a ${ratePercent}% Level ${tierLevel} commission (+${commissionLkr} LKR) from ${memberProfile.username} (${sourceLabel}).`,
+          messageSi: `ඔබගේ කණ්ඩායම් සාමාජික ${memberProfile.username} ගෙන් ${ratePercent}% (මට්ටම ${tierLevel}) කොමිස් මුදලක් (+${commissionLkr} LKR) ඔබගේ ගිණුමට එක් විය.`,
+          category: 'referral',
+          priority: 'high',
+          read: false,
+          actionTab: 'team',
+          actionLabel: 'View Team Earnings',
+          actionLabelSi: 'කණ්ඩායම් ආදායම බලන්න',
+          createdAt: new Date().toISOString(),
+        });
+        centralDb.notifications[uplineProfile.uid] = uplineNotifs;
+      } else if (!foundMemberInRefs) {
+        updatedUplineRefs.unshift({
+          id: `ref_tree_${uplineProfile.uid}_${memberProfile.uid}_L${tierLevel}`,
+          referrerUid: uplineProfile.uid,
+          referredUsername: memberProfile.username,
+          referralCodeUsed: uplineProfile.referralCode,
+          tierLevel,
+          vipLevel: Number(memberProfile.vipLevel || 0),
+          commissionEarned: 0,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      centralDb.referrals[uplineProfile.uid] = updatedUplineRefs;
+      currentCode = normalizeReferralCodeKey(uplineProfile.referredBy);
+    }
+
+    reconcileCentralFiveLevelReferrals();
+    saveCentralDbToDisk();
+
+    res.json({
+      ok: true,
+      db: centralDb,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to distribute commissions.' });
+  }
 });
 
 app.post('/api/db/sync', (req, res) => {
@@ -473,8 +886,8 @@ app.post('/api/db/sync', (req, res) => {
             incomingAcc.profile?.updatedAt || incomingAcc.profile?.createdAt || 0
           ).getTime();
 
-          // Take newer profile or force-overwrite if requested by admin
-          if (payload.forceOverwrite || incomingTime >= existingTime) {
+          // Take newer profile or force-overwrite if explicitly newer/requested
+          if (incomingTime >= existingTime || (payload.forceOverwrite && incomingTime >= existingTime - 2000)) {
             centralDb.accounts[uid] = {
               profile: {
                 ...existingAcc.profile,
@@ -625,6 +1038,7 @@ app.post('/api/db/login', (req, res) => {
       .trim()
       .toLowerCase();
     const queryDigits = queryStr.replace(/[^0-9]/g, '');
+    const queryPhoneCore = normalizePhoneCore(queryStr);
 
     if (!queryStr) {
       res.status(400).json({ error: 'Please enter your username, email, or mobile number.' });
@@ -638,14 +1052,24 @@ app.post('/api/db/login', (req, res) => {
       if (!acc || !acc.profile || deletedSet.has(acc.profile.uid)) return false;
       const uMobileDigits = String(acc.profile.mobile || '').replace(/[^0-9]/g, '');
       const fullPhoneDigits = `${String(acc.profile.countryCode || '').replace(/[^0-9]/g, '')}${uMobileDigits}`;
-      return (
-        String(acc.profile.username || '').toLowerCase() === queryStr ||
-        String(acc.profile.email || '').toLowerCase() === queryStr ||
-        (queryDigits.length >= 6 &&
-          (uMobileDigits === queryDigits ||
-            fullPhoneDigits === queryDigits ||
-            uMobileDigits.endsWith(queryDigits.slice(-9))))
-      );
+      const uPhoneCore = normalizePhoneCore(acc.profile.mobile, acc.profile.countryCode);
+
+      const usernameMatch = String(acc.profile.username || '').trim().toLowerCase() === queryStr;
+      const emailMatch = String(acc.profile.email || '').trim().toLowerCase() === queryStr;
+      const phoneMatch =
+        queryDigits.length >= 6 &&
+        (uMobileDigits === queryDigits ||
+          fullPhoneDigits === queryDigits ||
+          (uPhoneCore.length >= 6 && queryPhoneCore.length >= 6 && (
+            uPhoneCore === queryPhoneCore ||
+            uPhoneCore.endsWith(queryPhoneCore) ||
+            queryPhoneCore.endsWith(uPhoneCore)
+          )) ||
+          (uMobileDigits.length >= 7 &&
+            queryDigits.length >= 7 &&
+            uMobileDigits.slice(-7) === queryDigits.slice(-7)));
+
+      return usernameMatch || emailMatch || phoneMatch;
     });
 
     if (!matched) {
@@ -653,7 +1077,9 @@ app.post('/api/db/login', (req, res) => {
       return;
     }
 
-    if (String(matched.password) !== String(password)) {
+    const storedPass = String(matched.password || '');
+    const inputPass = String(password || '');
+    if (storedPass !== inputPass && storedPass.trim() !== inputPass.trim()) {
       res.status(401).json({ error: 'Incorrect password. Please check your password and try again.' });
       return;
     }

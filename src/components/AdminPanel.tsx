@@ -77,6 +77,8 @@ import {
   pushGlobalBroadcastNotification,
   pushUserNotification,
   recordFiveLevelReferralOnRegistration,
+  registerUserViaCentralDatabase,
+  extractReferralCode,
   saveOfficialDepositBanks,
   saveOfficialUsdtAddresses,
   savePlatformSponsorGlobalStats,
@@ -437,7 +439,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     uid: string,
     updatedProfile: UserProfile,
     updatedTransactions?: TransactionRecord[],
-    updatedReferrals?: ReferralRecordData[]
+    updatedReferrals?: ReferralRecordData[],
+    skipImmediateSync = false
   ) => {
     try {
       const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
@@ -458,7 +461,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       }
 
       loadAllAdminData();
-      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+      if (!skipImmediateSync) {
+        syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+      }
       if (onAdminMutateUser) {
         onAdminMutateUser(uid);
       }
@@ -504,6 +509,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       .toUpperCase()}`;
     const initialBal = Math.max(0, Number(Number(newBalanceLkr || 0).toFixed(2)));
     const nowIso = new Date().toISOString();
+    const cleanReferredBy = extractReferralCode(newReferredBy || 'ZENTRO-VIP888') || 'ZENTRO-VIP888';
 
     const createdProfile: UserProfile = {
       uid,
@@ -520,7 +526,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       locationTracked: `${newCountry.trim() || 'Sri Lanka'} (Admin Created)`,
       securityPasswordHash: cleanPin.slice(0, 128),
       referralCode: generatedRefCode,
-      referredBy: (newReferredBy || 'ZENTRO-VIP888').trim().toUpperCase(),
+      referredBy: cleanReferredBy,
       vipLevel: Number(newVipLevel) || 0,
       highestVipLevel: Number(newVipLevel) || 0,
       balance: initialBal,
@@ -561,12 +567,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
     // Record L1-L5 referral chain entries across uplines
     recordFiveLevelReferralOnRegistration(createdProfile);
+    await registerUserViaCentralDatabase(createdProfile, cleanPassword, initTxList[0]);
     if (createdProfile.vipLevel >= 1) {
       distributeFiveLevelVipAndDepositCommissions(
         createdProfile,
         0,
         'Admin Created VIP Member',
-        false
+        false,
+        `adm_create_${uid}`
       );
     }
 
@@ -731,15 +739,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    persistUserUpdate(editingVipUser.uid, updatedProfile, [
-      vipTx,
-      ...editingVipUser.transactions,
-    ]);
+    persistUserUpdate(
+      editingVipUser.uid,
+      updatedProfile,
+      [vipTx, ...editingVipUser.transactions],
+      undefined,
+      true
+    );
     distributeFiveLevelVipAndDepositCommissions(
       updatedProfile,
       0,
       'Admin VIP Update',
-      false
+      false,
+      vipTx.id
     );
     syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     pushUserNotification(editingVipUser.uid, {
@@ -896,7 +908,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         });
       }
 
-      persistUserUpdate(ownerBundle.uid, updatedProfile, updatedTx);
+      persistUserUpdate(ownerBundle.uid, updatedProfile, updatedTx, undefined, true);
       pushUserNotification(ownerBundle.uid, {
         title: `Deposit Approved: +${creditLkr} LKR Credited`,
         titleSi: `තැන්පතුව අනුමත කරන ලදී: +${creditLkr} LKR බැර විය`,
@@ -910,7 +922,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       });
 
       // Multi-level referral commission distribution (L1-L5) if user was referred by an active VIP member
-      distributeReferralCommissionsOnDeposit(ownerBundle.profile, creditLkr);
+      distributeReferralCommissionsOnDeposit(updatedProfile, creditLkr, deposit.id);
     } else {
       loadAllAdminData();
     }
@@ -932,13 +944,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const distributeReferralCommissionsOnDeposit = (
     depositorProfile: UserProfile,
-    depositAmountLkr: number
+    depositAmountLkr: number,
+    depositEventId?: string
   ) => {
     distributeFiveLevelVipAndDepositCommissions(
       depositorProfile,
       depositAmountLkr,
       'Deposit Approval',
-      true
+      true,
+      depositEventId
     );
     syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
     loadAllAdminData();

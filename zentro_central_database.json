@@ -1,0 +1,43 @@
+{
+  "accounts": {
+    "usr_mvxaisvm_wfq75": {
+      "profile": {
+        "uid": "usr_mvxaisvm_wfq75",
+        "username": "viduth",
+        "email": "viduth1000@gmail.com",
+        "countryCode": "🇱🇰 +94",
+        "mobile": "723905537",
+        "country": "Sri Lanka",
+        "currency": "LKR",
+        "language": "English",
+        "deviceId": "ZNT-ADM-MWFQ75",
+        "macAddress": "00:1A:2B:3C:4D:5E",
+        "ipAddress": "Admin Created",
+        "locationTracked": "Sri Lanka",
+        "securityPasswordHash": "888888",
+        "referralCode": "ZENTRO-MWFQ75",
+        "referredBy": "ZENTRO-VIP888",
+        "vipLevel": 4,
+        "highestVipLevel": 4,
+        "balance": 100,
+        "totalEarnings": 0,
+        "tasksCompletedToday": 0,
+        "kycStatus": "verified",
+        "createdAt": "2026-11-04T10:00:00.000Z",
+        "updatedAt": "2026-11-04T10:00:00.000Z"
+      },
+      "password": "viduth"
+    }
+  },
+  "transactions": {},
+  "bankAccounts": {},
+  "kycRecords": {},
+  "referrals": {},
+  "depositRequests": {},
+  "withdrawalRequests": {},
+  "notifications": {},
+  "globalBroadcasts": [],
+  "catalogs": {},
+  "deletedUids": [],
+  "updatedAt": "2026-11-05T20:00:00.000Z"
+}

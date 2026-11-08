@@ -101,7 +101,10 @@ import {
   recordFiveLevelReferralOnRegistration,
   distributeFiveLevelVipAndDepositCommissions,
   syncCentralDatabaseWithServer,
+  registerUserViaCentralDatabase,
   loginUserViaCentralDatabase,
+  extractReferralCode,
+  normalizePhoneForMatch,
   ZENTRO_ATRIUM_BG_DATA_URI,
   ZENTRO_ATRIUM_LIGHT_BG_DATA_URI,
 } from './types';
@@ -390,6 +393,18 @@ export default function App() {
       return;
     }
     setActiveTab(targetTab);
+    if (targetTab === 'team' && profile?.uid) {
+      reconcileFiveLevelReferralTreesLocal();
+      const savedRefs = localStorage.getItem(`zentro_refs_${profile.uid}`);
+      if (savedRefs) {
+        try {
+          setReferrals(JSON.parse(savedRefs));
+        } catch {
+          // ignore
+        }
+      }
+      syncCentralDatabaseWithServer().catch(() => {});
+    }
   };
 
   // Persistent local database helpers for direct Zentro username/password accounts
@@ -399,7 +414,8 @@ export default function App() {
     txList?: TransactionRecord[],
     bankList?: BankAccountRecord[],
     kycData?: KycRecordData | null,
-    refList?: ReferralRecordData[]
+    refList?: ReferralRecordData[],
+    skipImmediateSync = false
   ) => {
     try {
       const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
@@ -432,7 +448,9 @@ export default function App() {
       if (refList !== undefined) {
         localStorage.setItem(`zentro_refs_${userProfile.uid}`, JSON.stringify(refList));
       }
-      syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+      if (!skipImmediateSync) {
+        syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
+      }
     } catch (e) {
       console.error('Error saving local account record:', e);
     }
@@ -461,6 +479,30 @@ export default function App() {
     }
   };
 
+  // Self-healing guard: if a user is logged in on this phone, ensure their profile is always saved in zentro_accounts_db_v1 and synced to the server
+  useEffect(() => {
+    if (!profile?.uid || profile.uid === 'ADMIN') return;
+    try {
+      const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
+      const accounts = rawAccounts ? JSON.parse(rawAccounts) : {};
+      if (!accounts[profile.uid]) {
+        accounts[profile.uid] = {
+          profile,
+          password: 'zentro123',
+        };
+        localStorage.setItem('zentro_accounts_db_v1', JSON.stringify(accounts));
+        registerUserViaCentralDatabase(profile, 'zentro123').catch(() => {});
+      }
+      reconcileFiveLevelReferralTreesLocal();
+      const savedRefs = localStorage.getItem(`zentro_refs_${profile.uid}`);
+      if (savedRefs) {
+        setReferrals(JSON.parse(savedRefs));
+      }
+    } catch {
+      // ignore
+    }
+  }, [profile?.uid]);
+
   // Continuous central database synchronization across devices & browsers
   useEffect(() => {
     syncCentralDatabaseWithServer().catch(() => {});
@@ -469,9 +511,18 @@ export default function App() {
     }, 10000);
 
     const handleDbSynced = () => {
-      const activeUid = localStorage.getItem('zentro_active_session_uid');
+      const activeUid = localStorage.getItem('zentro_active_session_uid') || profile?.uid;
       if (activeUid && !authUser) {
         loadSessionFromStorage(activeUid);
+      } else if (activeUid) {
+        const savedRefs = localStorage.getItem(`zentro_refs_${activeUid}`);
+        if (savedRefs) {
+          try {
+            setReferrals(JSON.parse(savedRefs));
+          } catch {
+            // ignore
+          }
+        }
       }
     };
     window.addEventListener('zentro-db-synced', handleDbSynced);
@@ -479,7 +530,7 @@ export default function App() {
       clearInterval(interval);
       window.removeEventListener('zentro-db-synced', handleDbSynced);
     };
-  }, [authUser]);
+  }, [authUser, profile?.uid]);
 
   useEffect(() => {
     const unsubscribe = initAuth(async (user) => {
@@ -673,11 +724,21 @@ export default function App() {
     const unsubRefs = onSnapshot(
       refQuery,
       (snap) => {
-        const list: ReferralRecordData[] = snap.docs.map((d) => ({
+        const remoteList: ReferralRecordData[] = snap.docs.map((d) => ({
           id: d.id,
           ...(d.data() as Omit<ReferralRecordData, 'id'>),
         }));
-        setReferrals(list);
+        try {
+          const savedLocalRefs = localStorage.getItem(`zentro_refs_${uid}`);
+          const localList: ReferralRecordData[] = savedLocalRefs ? JSON.parse(savedLocalRefs) : [];
+          const byId = new Map<string, ReferralRecordData>();
+          for (const item of [...localList, ...remoteList]) {
+            if (item && item.id) byId.set(item.id, item);
+          }
+          setReferrals(Array.from(byId.values()));
+        } catch {
+          setReferrals(remoteList);
+        }
       },
       (error) => {
         safeFirestoreCatch(error, OperationType.LIST, 'referrals');
@@ -770,30 +831,34 @@ export default function App() {
         return;
       }
 
-      if (
-        !pendingReg.referralCode ||
-        !pendingReg.referralCode.trim() ||
-        !isValidReferralCodeFormat(pendingReg.referralCode)
-      ) {
+      const normalizedInviteCode = extractReferralCode(pendingReg.referralCode);
+      if (!normalizedInviteCode || !isValidReferralCodeFormat(normalizedInviteCode)) {
         setAuthError(
-          'An Invite Code is required to register. Please open the registration link shared by an active VIP member.'
+          'An Invite Code is required to register. Please open the registration link shared by an active VIP member or enter a valid Invite Code.'
         );
         return;
       }
 
       // Verify if the referral code belongs to a registered member; if so, they MUST be a VIP member (vipLevel >= 1)
-      const referrerAccount = Object.values(accounts).find(
-        (acc) =>
-          acc?.profile &&
-          acc.profile.referralCode.toUpperCase() ===
-            pendingReg.referralCode.trim().toUpperCase()
-      );
+      const referrerAccount = Object.values(accounts).find((acc) => {
+        if (!acc?.profile) return false;
+        const accCode = extractReferralCode(acc.profile.referralCode);
+        return (
+          accCode === normalizedInviteCode ||
+          accCode === `ZENTRO-${normalizedInviteCode}` ||
+          `ZENTRO-${accCode}` === normalizedInviteCode
+        );
+      });
       if (referrerAccount && referrerAccount.profile.vipLevel < 1) {
         setAuthError(
           'Only active VIP members (Zentro Bronze, Silver, Gold, or Platinum) can share referral links and refer new members.'
         );
         return;
       }
+
+      const canonicalReferredBy = referrerAccount?.profile?.referralCode
+        ? referrerAccount.profile.referralCode.trim().toUpperCase()
+        : normalizedInviteCode.slice(0, 32);
 
       const cleanId = `usr_${Date.now().toString(36)}_${Math.random()
         .toString(36)
@@ -859,7 +924,7 @@ export default function App() {
         locationTracked: telemetry.location.slice(0, 120),
         securityPasswordHash: pendingReg.securityPassword.slice(0, 128),
         referralCode: generatedRefCode,
-        referredBy: pendingReg.referralCode.trim().toUpperCase().slice(0, 32),
+        referredBy: canonicalReferredBy,
         vipLevel: 0,
         balance: 100.0,
         totalEarnings: 0,
@@ -875,9 +940,25 @@ export default function App() {
         type: 'referral_bonus',
         amount: 100.0,
         status: 'completed',
-        description: `Welcome Invitee Bonus (${pendingReg.referralCode.trim().toUpperCase()})`,
+        description: `Welcome Invitee Bonus (${canonicalReferredBy})`,
         createdAt: new Date().toISOString(),
       };
+
+      // Save locally first without firing a premature unawaited sync
+      saveLocalUserRecord(newProfile, pendingReg.password, [welcomeTx], [], null, [], true);
+      // Track 5-level referral chain (L1-L5) across all 5 uplines and credit L1 Friend Registration Bonus
+      recordFiveLevelReferralOnRegistration(newProfile);
+
+      // Atomically register user & 5-level referral chain on the central server database
+      const centralReg = await registerUserViaCentralDatabase(
+        newProfile,
+        pendingReg.password,
+        welcomeTx
+      );
+      if (!centralReg.ok) {
+        setAuthError(centralReg.error || 'Registration failed.');
+        return;
+      }
 
       bindDeviceAccountLock({
         uid: cleanId,
@@ -890,9 +971,6 @@ export default function App() {
         lockedAt: new Date().toISOString(),
       });
 
-      saveLocalUserRecord(newProfile, pendingReg.password, [welcomeTx], [], null, []);
-      // Track 5-level referral chain (L1-L5) across all 5 uplines and credit L1 Friend Registration Bonus
-      recordFiveLevelReferralOnRegistration(newProfile);
       await syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
 
       localStorage.setItem('zentro_active_session_uid', cleanId);
@@ -960,15 +1038,25 @@ export default function App() {
 
       const queryStr = loginData.identifier.trim().toLowerCase();
       const queryDigits = queryStr.replace(/[^0-9]/g, '');
+      const queryPhoneCore = normalizePhoneForMatch(queryStr);
       const matched = Object.values(accounts).find((acc) => {
         if (!acc?.profile) return false;
         const uMobileDigits = (acc.profile.mobile || '').replace(/[^0-9]/g, '');
+        const uPhoneCore = normalizePhoneForMatch(
+          acc.profile.mobile || '',
+          acc.profile.countryCode || ''
+        );
         return (
-          acc.profile.username.toLowerCase() === queryStr ||
-          acc.profile.email.toLowerCase() === queryStr ||
+          acc.profile.username.trim().toLowerCase() === queryStr ||
+          acc.profile.email.trim().toLowerCase() === queryStr ||
           (queryDigits.length >= 6 &&
             (uMobileDigits === queryDigits ||
-              uMobileDigits.endsWith(queryDigits.slice(-9))))
+              (uPhoneCore.length >= 6 &&
+                queryPhoneCore.length >= 6 &&
+                (uPhoneCore === queryPhoneCore ||
+                  uPhoneCore.endsWith(queryPhoneCore) ||
+                  queryPhoneCore.endsWith(uPhoneCore))) ||
+              uMobileDigits.endsWith(queryDigits.slice(-7))))
         );
       });
 
@@ -981,7 +1069,10 @@ export default function App() {
         return;
       }
 
-      if (matched.password !== loginData.password) {
+      if (
+        matched.password !== loginData.password &&
+        matched.password.trim() !== loginData.password.trim()
+      ) {
         setAuthError('Incorrect password. Please check your password and try again.');
         return;
       }
@@ -1330,14 +1421,15 @@ export default function App() {
       if (!authUser) {
         setTransactions(nextTx);
       }
-      saveLocalUserRecord(updatedProfile, undefined, nextTx);
+      saveLocalUserRecord(updatedProfile, undefined, nextTx, undefined, undefined, undefined, true);
 
       // Update downline VIP status across all 5 uplines (L1-L5) & distribute 5-level commissions if upgrading to a higher tier
       distributeFiveLevelVipAndDepositCommissions(
         updatedProfile,
-         !isDowngradeForTasks ? tier.unlockAmount : 0,
+        !isDowngradeForTasks ? tier.unlockAmount : 0,
         `${tier.name} (VIP ${tier.level}) Activation`,
-        !isDowngradeForTasks
+        !isDowngradeForTasks,
+        newTx.id
       );
       syncCentralDatabaseWithServer({ forceOverwrite: true }).catch(() => {});
 

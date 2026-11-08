@@ -19,6 +19,7 @@ import {
   getExistingDeviceAccountLock,
   syncLocalDeviceLockToServer,
   isValidReferralCodeFormat,
+  extractReferralCode,
   isAdminCredentials,
   ZENTRO_ATRIUM_BG_DATA_URI,
   ZENTRO_ATRIUM_LIGHT_BG_DATA_URI,
@@ -479,30 +480,18 @@ export const AuthGate: React.FC<AuthGateProps> = ({
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const refParam = (params.get('ref') || params.get('invite') || params.get('code') || '')
-      .trim()
-      .toUpperCase();
+    const rawUrlRef =
+      params.get('ref') ||
+      params.get('invite') ||
+      params.get('code') ||
+      extractReferralCode(window.location.search) ||
+      extractReferralCode(window.location.hash) ||
+      sessionStorage.getItem('zentro_saved_invite_code') ||
+      '';
+    const refParam = extractReferralCode(rawUrlRef);
     if (refParam && isValidReferralCodeFormat(refParam)) {
-      let isNonVipLocalReferrer = false;
-      try {
-        const rawAccounts = localStorage.getItem('zentro_accounts_db_v1');
-        if (rawAccounts) {
-          const accounts = JSON.parse(rawAccounts);
-          const matched = Object.values(accounts).find(
-            (acc: any) => acc?.profile?.referralCode?.toUpperCase() === refParam
-          ) as any;
-          if (matched && (matched.profile?.vipLevel ?? 0) < 1) {
-            isNonVipLocalReferrer = true;
-          }
-        }
-      } catch {
-        // ignore
-      }
-      if (!isNonVipLocalReferrer) {
-        setReferralCode(refParam);
-      } else {
-        setReferralCode('');
-      }
+      sessionStorage.setItem('zentro_saved_invite_code', refParam);
+      setReferralCode(refParam);
     } else {
       setReferralCode('');
     }
@@ -978,11 +967,17 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <InviteePictureIcon />
                   <input
                     type="text"
-                    readOnly
                     value={referralCode}
-                    placeholder="Invite code empty (Use VIP member ref link)"
-                    title="Invite code is only populated via a VIP member's referral link"
-                    className="w-full bg-transparent text-sm font-mono font-bold focus:outline-none cursor-not-allowed select-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                    onChange={(e) => {
+                      const extracted = extractReferralCode(e.target.value);
+                      setReferralCode(extracted);
+                      if (extracted && isValidReferralCodeFormat(extracted)) {
+                        sessionStorage.setItem('zentro_saved_invite_code', extracted);
+                      }
+                    }}
+                    placeholder="Enter Invite Code or paste VIP referral link"
+                    title="Auto-filled via referral link or paste your VIP referrer's invite code/link"
+                    className="w-full bg-transparent text-sm font-mono font-bold focus:outline-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                   {isRefValid ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-gradient-to-r from-blue-500 to-pink-500 text-white text-[10px] font-mono font-bold shrink-0">
